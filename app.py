@@ -32,9 +32,10 @@ st.markdown("""
     /* Заголовок */
     .main-header {
         color: var(--primary-color);
-        font-size: 2rem;
+        font-size: 1.7rem;
         font-weight: 700;
         margin-bottom: 0.5rem;
+        line-height: 1.2;
     }
     .main-subheader {
         color: var(--text-color);
@@ -95,7 +96,6 @@ st.markdown("""
     
     /* ===== МОБИЛЬНАЯ АДАПТАЦИЯ ===== */
     @media (max-width: 768px) {
-        /* Заголовок — компактнее */
         .main-header {
             font-size: 1.3rem !important;
             line-height: 1.2;
@@ -107,7 +107,6 @@ st.markdown("""
             line-height: 1.3;
         }
         
-        /* Основной контейнер — меньше отступы */
         .block-container {
             padding-top: 1rem !important;
             padding-bottom: 3rem !important;
@@ -115,7 +114,6 @@ st.markdown("""
             padding-right: 0.75rem !important;
         }
         
-        /* Сайдбар — не фиксировать ширину */
         [data-testid="stSidebar"] {
             min-width: 0 !important;
             max-width: 100% !important;
@@ -125,7 +123,6 @@ st.markdown("""
             padding: 0.4rem 0.6rem;
         }
         
-        /* Кнопки — компактнее */
         .stButton > button,
         .stFormSubmitButton > button {
             font-size: 0.9rem !important;
@@ -133,28 +130,24 @@ st.markdown("""
             min-height: 2.6rem;
         }
         
-        /* Кнопка "Найти ответ" — компактная, но крупная по высоте */
         .stFormSubmitButton > button {
             font-size: 1rem !important;
             padding: 0.75rem 1.5rem !important;
             min-height: 3rem !important;
         }
         
-        /* Поле ввода */
         .stTextInput > div > div > input {
             font-size: 1rem !important;
             padding: 0.75rem !important;
             min-height: 2.75rem;
         }
         
-        /* Карточка с фрагментами */
         .fragments-info {
             font-size: 0.85rem;
             padding: 0.6rem 0.8rem;
             margin: 0.75rem 0;
         }
         
-        /* Расширялки — компактнее */
         .stExpander {
             margin-bottom: 0.5rem !important;
         }
@@ -249,7 +242,8 @@ with st.sidebar:
         "Искать только в:",
         options=sources_list,
         default=[],
-        format_func=lambda x: x.replace(".txt", "")[:45] + "...",
+        placeholder="Выберите документы...",
+        format_func=lambda x: x.replace(".txt", "")[:40] + "...",
         key="source_filter"
     )
     
@@ -269,7 +263,12 @@ with st.sidebar:
         else:
             icon = "📄"
         
-        display_name = src.replace(".txt", "")[:45]
+        # Обрезка имени с явным многоточием
+        clean_name = src.replace(".txt", "")
+        if len(clean_name) > 40:
+            display_name = clean_name[:40] + "..."
+        else:
+            display_name = clean_name
         
         st.markdown(
             f'<div class="doc-card">{icon} {display_name}</div>',
@@ -309,7 +308,7 @@ examples = [
     ("🌉 Мосты", "требования к мостам"),
 ]
 
-# Ряд 1 — первые два примера
+# Ряд 1
 row1 = st.columns(2)
 for i, (label, query) in enumerate(examples[:2]):
     with row1[i]:
@@ -317,7 +316,7 @@ for i, (label, query) in enumerate(examples[:2]):
             st.session_state.selected_example = query
             st.rerun()
 
-# Ряд 2 — вторые два примера
+# Ряд 2
 row2 = st.columns(2)
 for i, (label, query) in enumerate(examples[2:], start=2):
     with row2[i - 2]:
@@ -346,7 +345,6 @@ if ask_button:
     if not question.strip():
         st.warning("Пожалуйста, введите вопрос.")
     else:
-        # Сохраняем в историю
         if question not in st.session_state.history:
             st.session_state.history.append(question)
         
@@ -355,7 +353,6 @@ if ask_button:
 
         candidates = []
 
-        # Подготовка фильтра
         where_filter = None
         if selected_sources:
             where_filter = {"source": {"$in": selected_sources}}
@@ -455,7 +452,6 @@ if ask_button:
         if not filtered:
             filtered = candidates
 
-        # Убираем дубли
         seen = set()
         unique_filtered = []
         for c in filtered:
@@ -465,7 +461,6 @@ if ask_button:
 
         unique_filtered = unique_filtered[:25]
 
-        # Формируем контекст
         context = ""
         sources = []
         for c in unique_filtered:
@@ -480,18 +475,15 @@ if ask_button:
 
         status_placeholder.empty()
 
-        # Сохраняем в session_state
         st.session_state.current_question = question
         st.session_state.current_sources = sources
         st.session_state.current_fragments = unique_filtered
 
-        # Карточка с количеством фрагментов
         st.markdown(
             f'<div class="fragments-info">📖 Отобрано фрагментов: {len(unique_filtered)}</div>',
             unsafe_allow_html=True
         )
 
-        # Промпт для ИИ
         prompt = f"""Не размышляй. Сразу давай ответ.
 Ты — эксперт по строительным нормам и правилам.
 Отвечай подробно. Приведи ВСЕ найденные допуски и отклонения из фрагментов.
@@ -536,7 +528,6 @@ if st.session_state.current_answer:
     # ===== КНОПКИ ДЕЙСТВИЙ =====
     action_cols = st.columns([1, 1, 1, 2])
 
-    # PDF скачивание
     with action_cols[0]:
         if IRONPRESS_OK:
             try:
@@ -556,12 +547,10 @@ if st.session_state.current_answer:
         else:
             st.caption("PDF: установите ironpress")
 
-    # Копировать
     with action_cols[1]:
         with st.popover("📋 Копировать"):
             st.code(answer, language="markdown")
 
-    # Обратная связь 👍/👎
     with action_cols[2]:
         fb = st.feedback("thumbs", key=f"fb_{hash(question)}")
         if fb is not None:
@@ -571,12 +560,10 @@ if st.session_state.current_answer:
             else:
                 st.toast("👎 Спасибо, мы учтём это")
 
-    # Источники
     with st.expander(f"📚 Показать источники ({len(sources)})", expanded=False):
         for src in sources[:15]:
             st.markdown(f"• {src}")
 
-    # Показ фрагментов
     with st.expander(f"🔍 Показать фрагменты ({len(unique_filtered)})", expanded=False):
         for i, c in enumerate(unique_filtered, 1):
             ref = c['source']
