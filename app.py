@@ -44,6 +44,14 @@ st.markdown("""
         margin-bottom: 1.5rem;
     }
     
+    /* Заголовок сайдбара — синий */
+    .sidebar-header {
+        color: var(--primary-color);
+        font-size: 1.3rem;
+        font-weight: 700;
+        margin-bottom: 0.5rem;
+    }
+    
     /* Кнопки */
     .stButton > button, .stFormSubmitButton > button {
         border-radius: 8px;
@@ -232,7 +240,8 @@ if "current_question" not in st.session_state:
 
 # ==================== САЙДБАР ====================
 with st.sidebar:
-    st.markdown("## 📚 База знаний")
+    # Заголовок "База знаний" — синий
+    st.markdown('<div class="sidebar-header">📚 База знаний</div>', unsafe_allow_html=True)
     st.markdown(f"**{len(sources_list)}** документов загружено")
     st.markdown("---")
     
@@ -263,10 +272,14 @@ with st.sidebar:
         else:
             icon = "📄"
         
-        # Обрезка имени с явным многоточием
+        # Обрезка по границам слов
         clean_name = src.replace(".txt", "")
         if len(clean_name) > 40:
-            display_name = clean_name[:40] + "..."
+            truncated = clean_name[:40]
+            # Обрезаем по последнему пробелу
+            if ' ' in truncated:
+                truncated = truncated.rsplit(' ', 1)[0]
+            display_name = truncated + "..."
         else:
             display_name = clean_name
         
@@ -295,7 +308,7 @@ with st.sidebar:
 
 
 # ==================== ОСНОВНОЙ КОНТЕНТ ====================
-st.markdown('<h1 class="main-header">🏗️ Поиск по строительным нормам</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header">🏗️ Поиск по СНиПам</h1>', unsafe_allow_html=True)
 st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
 
 # ==================== ПРИМЕРЫ ВОПРОСОВ (2×2) ====================
