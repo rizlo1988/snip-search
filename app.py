@@ -35,7 +35,7 @@ st.markdown("""
     }
     
     /* Кнопки */
-    .stButton > button {
+    .stButton > button, .stFormSubmitButton > button {
         background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%);
         color: white;
         border: none;
@@ -45,7 +45,7 @@ st.markdown("""
         transition: all 0.3s;
         white-space: nowrap;
     }
-    .stButton > button:hover {
+    .stButton > button:hover, .stFormSubmitButton > button:hover {
         transform: translateY(-2px);
         box-shadow: 0 6px 20px rgba(37, 99, 235, 0.4);
     }
@@ -195,7 +195,7 @@ with st.sidebar:
 st.markdown('<h1 class="main-header">🏗️ Поиск по строительным нормам</h1>', unsafe_allow_html=True)
 st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
 
-# Примеры вопросов
+# Примеры вопросов (клик заполняет поле, но НЕ запускает поиск)
 st.markdown("**💡 Примеры вопросов:**")
 example_cols = st.columns(4)
 examples = [
@@ -211,22 +211,24 @@ for i, (label, query) in enumerate(examples):
             st.session_state.selected_example = query
             st.rerun()
 
-# Поле ввода — берёт значение из selected_example
-question = st.text_input(
-    "Ваш вопрос:",
-    value=st.session_state.selected_example,
-    placeholder="Например: допуски по асфальту",
-    key="question_field"
-)
 
-# Сбрасываем selected_example после отрисовки поля
+# ==================== ФОРМА ПОИСКА ====================
+# Enter в поле ввода = нажатие кнопки "Найти ответ"
+with st.form("search_form", clear_on_submit=False):
+    question = st.text_input(
+        "Ваш вопрос:",
+        value=st.session_state.selected_example,
+        placeholder="Например: допуски по асфальту",
+        key="question_field"
+    )
+    
+    ask_button = st.form_submit_button("🔍 Найти ответ", type="primary", use_container_width=False)
+
+# Сбрасываем selected_example после отрисовки формы
 if st.session_state.selected_example:
     st.session_state.selected_example = ""
 
-# Кнопка
-ask_button = st.button("🔍 Найти ответ", type="primary")
-
-# Обработка: кнопка нажата
+# ==================== ОБРАБОТКА ПОИСКА ====================
 if ask_button:
     if not question.strip():
         st.warning("Пожалуйста, введите вопрос.")
@@ -235,118 +237,124 @@ if ask_button:
         if question not in st.session_state.history:
             st.session_state.history.append(question)
         
-        with st.spinner("Ищу ответ в документах..."):
-            candidates = []
+        # Индикатор «⏳ Ищу…»
+        status_placeholder = st.empty()
+        status_placeholder.info("⏳ Ищу ответ в документах…")
 
-            # Векторный поиск
-            vector_results = collection.query(
-                query_texts=[question],
-                n_results=30
+        candidates = []
+
+        # Векторный поиск
+        vector_results = collection.query(
+            query_texts=[question],
+            n_results=30
+        )
+        if vector_results['documents'] and vector_results['documents'][0]:
+            for i, doc in enumerate(vector_results['documents'][0]):
+                meta = vector_results['metadatas'][0][i]
+                candidates.append({
+                    'text': doc,
+                    'source': meta['source'],
+                    'section': meta.get('section', ''),
+                    'tables': meta.get('tables', ''),
+                    'type': 'векторный'
+                })
+
+        # Поиск по таблицам
+        table_matches = re.findall(
+            r'таблиц[аы]?\s*([А-ЯA-Z]?\.?\d+(?:\.\d+)?)',
+            question,
+            re.IGNORECASE
+        )
+        if table_matches:
+            for table_num in table_matches:
+                try:
+                    table_results = collection.get(
+                        where_document={"$contains": f"Таблица {table_num}"},
+                        limit=10
+                    )
+                    if table_results['documents']:
+                        for i, doc in enumerate(table_results['documents']):
+                            meta = table_results['metadatas'][i]
+                            candidates.append({
+                                'text': doc,
+                                'source': meta['source'],
+                                'section': meta.get('section', ''),
+                                'tables': meta.get('tables', ''),
+                                'type': f'таблица {table_num}'
+                            })
+                except Exception:
+                    pass
+
+        # Поиск по ключевым словам
+        if re.search(r'допуск|отклонени', question, re.IGNORECASE):
+            keyword_results = collection.query(
+                query_texts=["допуск отклонение не более мм"],
+                n_results=20
             )
-            if vector_results['documents'] and vector_results['documents'][0]:
-                for i, doc in enumerate(vector_results['documents'][0]):
-                    meta = vector_results['metadatas'][0][i]
+            if keyword_results['documents'] and keyword_results['documents'][0]:
+                for i, doc in enumerate(keyword_results['documents'][0]):
+                    meta = keyword_results['metadatas'][0][i]
                     candidates.append({
                         'text': doc,
                         'source': meta['source'],
                         'section': meta.get('section', ''),
                         'tables': meta.get('tables', ''),
-                        'type': 'векторный'
+                        'type': 'ключевые слова'
                     })
 
-            # Поиск по таблицам
-            table_matches = re.findall(
-                r'таблиц[аы]?\s*([А-ЯA-Z]?\.?\d+(?:\.\d+)?)',
-                question,
-                re.IGNORECASE
+        # Фильтрация
+        filtered = []
+        for c in candidates:
+            text_lower = c['text'].lower()
+            has_number = bool(re.search(r'\d+', c['text']))
+            has_keyword = any(
+                word in text_lower
+                for word in ['допуск', 'отклонен', 'мм', 'таблиц', 'не более']
             )
-            if table_matches:
-                for table_num in table_matches:
-                    try:
-                        table_results = collection.get(
-                            where_document={"$contains": f"Таблица {table_num}"},
-                            limit=10
-                        )
-                        if table_results['documents']:
-                            for i, doc in enumerate(table_results['documents']):
-                                meta = table_results['metadatas'][i]
-                                candidates.append({
-                                    'text': doc,
-                                    'source': meta['source'],
-                                    'section': meta.get('section', ''),
-                                    'tables': meta.get('tables', ''),
-                                    'type': f'таблица {table_num}'
-                                })
-                    except Exception:
-                        pass
+            if has_number and has_keyword:
+                filtered.append(c)
 
-            # Поиск по ключевым словам
-            if re.search(r'допуск|отклонени', question, re.IGNORECASE):
-                keyword_results = collection.query(
-                    query_texts=["допуск отклонение не более мм"],
-                    n_results=20
-                )
-                if keyword_results['documents'] and keyword_results['documents'][0]:
-                    for i, doc in enumerate(keyword_results['documents'][0]):
-                        meta = keyword_results['metadatas'][0][i]
-                        candidates.append({
-                            'text': doc,
-                            'source': meta['source'],
-                            'section': meta.get('section', ''),
-                            'tables': meta.get('tables', ''),
-                            'type': 'ключевые слова'
-                        })
+        if not filtered:
+            filtered = candidates
 
-            # Фильтрация
-            filtered = []
-            for c in candidates:
-                text_lower = c['text'].lower()
-                has_number = bool(re.search(r'\d+', c['text']))
-                has_keyword = any(
-                    word in text_lower
-                    for word in ['допуск', 'отклонен', 'мм', 'таблиц', 'не более']
-                )
-                if has_number and has_keyword:
-                    filtered.append(c)
+        # Убираем дубли
+        seen = set()
+        unique_filtered = []
+        for c in filtered:
+            if c['text'] not in seen:
+                seen.add(c['text'])
+                unique_filtered.append(c)
 
-            if not filtered:
-                filtered = candidates
+        unique_filtered = unique_filtered[:25]
 
-            # Убираем дубли
-            seen = set()
-            unique_filtered = []
-            for c in filtered:
-                if c['text'] not in seen:
-                    seen.add(c['text'])
-                    unique_filtered.append(c)
+        # Формируем контекст
+        context = ""
+        sources = []
+        for c in unique_filtered:
+            ref = c['source']
+            if c['section']:
+                ref += f", раздел {c['section']}"
+            if c['tables']:
+                ref += f", таблица {c['tables']}"
+            context += f"\n\n--- Источник: {ref} ---\n{c['text']}"
+            if ref not in sources:
+                sources.append(ref)
 
-            unique_filtered = unique_filtered[:25]
+        # Убираем индикатор
+        status_placeholder.empty()
 
-            # Формируем контекст
-            context = ""
-            sources = []
-            for c in unique_filtered:
-                ref = c['source']
-                if c['section']:
-                    ref += f", раздел {c['section']}"
-                if c['tables']:
-                    ref += f", таблица {c['tables']}"
-                context += f"\n\n--- Источник: {ref} ---\n{c['text']}"
-                if ref not in sources:
-                    sources.append(ref)
+        # Карточка с количеством фрагментов
+        st.markdown(
+            f'<div class="fragments-info">📖 Отобрано фрагментов: {len(unique_filtered)}</div>',
+            unsafe_allow_html=True
+        )
+        
+        with st.expander(f"📚 Показать источники ({len(sources)})", expanded=False):
+            for src in sources[:15]:
+                st.markdown(f"• {src}")
 
-            # Карточка с количеством фрагментов
-            st.markdown(
-                f'<div class="fragments-info">📖 Отобрано фрагментов: {len(unique_filtered)}</div>',
-                unsafe_allow_html=True
-            )
-            
-            with st.expander(f"📚 Показать источники ({len(sources)})", expanded=False):
-                for src in sources[:15]:
-                    st.markdown(f"• {src}")
-
-            # Промпт для ИИ
-            prompt = f"""Не размышляй. Сразу давай ответ.
+        # Промпт для ИИ
+        prompt = f"""Не размышляй. Сразу давай ответ.
 Ты — эксперт по строительным нормам и правилам.
 Отвечай подробно. Приведи ВСЕ найденные допуски и отклонения из фрагментов.
 Структурируй ответ: раздели на пункты, для каждого укажи значение и источник.
@@ -360,7 +368,8 @@ if ask_button:
 {question}
 """
 
-            try:
+        try:
+            with st.spinner("🤖 ИИ формулирует ответ…"):
                 response = client.chat.completions.create(
                     model="Qwen/Qwen3-30B-A3B",
                     messages=[{"role": "user", "content": prompt}],
@@ -368,11 +377,27 @@ if ask_button:
                     extra_body={"enable_thinking": False}
                 )
 
-                answer = response.choices[0].message.content
+            answer = response.choices[0].message.content
 
-                st.success("✅ Ответ найден!")
-                st.markdown("### 📖 Ответ:")
-                st.markdown(answer)
+            st.success("✅ Ответ найден!")
+            st.markdown("### 📖 Ответ:")
+            st.markdown(answer)
 
-            except Exception as e:
-                st.error(f"Произошла ошибка: {e}")
+            # Кнопка "Копировать ответ" — через st.code (без плагинов)
+            with st.expander("📋 Копировать ответ (нажми на иконку справа сверху)", expanded=False):
+                st.code(answer, language="markdown")
+
+            # Показ исходных фрагментов под ответом
+            with st.expander(f"🔍 Показать фрагменты, на которых основан ответ ({len(unique_filtered)})", expanded=False):
+                for i, c in enumerate(unique_filtered, 1):
+                    ref = c['source']
+                    if c['section']:
+                        ref += f", раздел {c['section']}"
+                    if c['tables']:
+                        ref += f", таблица {c['tables']}"
+                    st.markdown(f"**Фрагмент {i}** · *{ref}* · тип поиска: `{c['type']}`")
+                    st.markdown(f"> {c['text']}")
+                    st.markdown("---")
+
+        except Exception as e:
+            st.error(f"Произошла ошибка: {e}")
