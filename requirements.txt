@@ -2,3 +2,5 @@ streamlit
 chromadb
 sentence-transformers
 openai
+torchvision
+ironpress

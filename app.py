@@ -3,14 +3,22 @@ import chromadb
 from openai import OpenAI
 import re
 import os
+from datetime import datetime
 from db_builder import build_database, DB_PATH, COLLECTION_NAME
+
+# PDF
+try:
+    import ironpress
+    IRONPRESS_OK = True
+except ImportError:
+    IRONPRESS_OK = False
 
 # ==================== НАСТРОЙКИ СТРАНИЦЫ ====================
 st.set_page_config(
     page_title="Поиск по СНиПам",
     page_icon="🏗️",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="auto"
 )
 
 # ==================== КАСТОМНЫЙ CSS ====================
@@ -18,61 +26,51 @@ st.markdown("""
 <style>
     /* Основной фон */
     .stApp {
-        background: linear-gradient(135deg, #f5f7fa 0%, #e8eef5 100%);
+        background: var(--background-color);
     }
     
     /* Заголовок */
     .main-header {
-        color: #1e3a8a;
+        color: var(--primary-color);
         font-size: 2rem;
         font-weight: 700;
         margin-bottom: 0.5rem;
     }
     .main-subheader {
-        color: #475569;
+        color: var(--text-color);
+        opacity: 0.7;
         font-size: 1rem;
         margin-bottom: 1.5rem;
     }
     
     /* Кнопки */
     .stButton > button, .stFormSubmitButton > button {
-        background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%);
-        color: white;
-        border: none;
         border-radius: 8px;
-        padding: 0.5rem 1rem;
         font-weight: 600;
         transition: all 0.3s;
         white-space: nowrap;
     }
     .stButton > button:hover, .stFormSubmitButton > button:hover {
         transform: translateY(-2px);
-        box-shadow: 0 6px 20px rgba(37, 99, 235, 0.4);
     }
     
     /* Поле ввода */
     .stTextInput > div > div > input {
         border-radius: 8px;
-        border: 2px solid #cbd5e1;
         padding: 0.75rem;
         font-size: 1rem;
     }
-    .stTextInput > div > div > input:focus {
-        border-color: #2563eb;
-        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
-    }
     
-    /* Сайдбар — узкий */
+    /* Сайдбар — узкий на десктопе */
     [data-testid="stSidebar"] {
-        background: white;
         min-width: 260px !important;
         max-width: 300px !important;
     }
     
     /* Карточки документов */
     .doc-card {
-        background: #f8fafc;
-        border-left: 4px solid #2563eb;
+        background: var(--secondary-background-color);
+        border-left: 4px solid var(--primary-color);
         padding: 0.5rem 0.75rem;
         margin-bottom: 0.4rem;
         border-radius: 6px;
@@ -82,11 +80,11 @@ st.markdown("""
     
     /* Карточка с количеством фрагментов */
     .fragments-info {
-        background: #eff6ff;
+        background: var(--secondary-background-color);
         border-radius: 8px;
         padding: 0.75rem 1rem;
         margin: 1rem 0;
-        color: #1e40af;
+        color: var(--primary-color);
         font-weight: 600;
     }
     
@@ -94,6 +92,30 @@ st.markdown("""
     .block-container {
         padding-top: 2rem;
         padding-bottom: 2rem;
+    }
+    
+    /* ===== МОБИЛЬНАЯ АДАПТАЦИЯ ===== */
+    @media (max-width: 768px) {
+        .main-header {
+            font-size: 1.4rem;
+        }
+        .main-subheader {
+            font-size: 0.9rem;
+        }
+        .block-container {
+            padding-top: 1rem;
+            padding-bottom: 1rem;
+            padding-left: 0.5rem;
+            padding-right: 0.5rem;
+        }
+        [data-testid="stSidebar"] {
+            min-width: 85vw !important;
+            max-width: 85vw !important;
+        }
+        .stButton > button {
+            font-size: 0.8rem;
+            padding: 0.4rem 0.6rem;
+        }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -159,13 +181,38 @@ if "history" not in st.session_state:
     st.session_state.history = []
 if "selected_example" not in st.session_state:
     st.session_state.selected_example = ""
-if "last_question" not in st.session_state:
-    st.session_state.last_question = ""
+if "feedback" not in st.session_state:
+    st.session_state.feedback = {}
+if "current_answer" not in st.session_state:
+    st.session_state.current_answer = None
+if "current_sources" not in st.session_state:
+    st.session_state.current_sources = []
+if "current_fragments" not in st.session_state:
+    st.session_state.current_fragments = []
+if "current_question" not in st.session_state:
+    st.session_state.current_question = ""
 
 # ==================== САЙДБАР ====================
 with st.sidebar:
     st.markdown("## 📚 База знаний")
     st.markdown(f"**{len(sources_list)}** документов загружено")
+    st.markdown("---")
+    
+    # Фильтр по документам
+    st.markdown("### 🎯 Фильтр по документам")
+    selected_sources = st.multiselect(
+        "Искать только в:",
+        options=sources_list,
+        default=[],
+        format_func=lambda x: x.replace(".txt", "")[:45] + "...",
+        key="source_filter"
+    )
+    
+    if selected_sources:
+        st.caption(f"🔍 Поиск в **{len(selected_sources)}** документ(ах)")
+    else:
+        st.caption("🔍 Поиск во **всех** документах")
+    
     st.markdown("---")
     
     st.markdown("### 📄 Документы")
@@ -177,25 +224,37 @@ with st.sidebar:
         else:
             icon = "📄"
         
-        display_name = src.replace(".txt", "")
+        display_name = src.replace(".txt", "")[:45]
         
         st.markdown(
             f'<div class="doc-card">{icon} {display_name}</div>',
             unsafe_allow_html=True
         )
     
+    # История — кликабельная
     if st.session_state.history:
         st.markdown("---")
         st.markdown("### 🕐 История")
-        for q in st.session_state.history[-5:]:
-            st.markdown(f"• {q}")
+        st.caption("Нажми на вопрос, чтобы повторить")
+        for i, q in enumerate(reversed(st.session_state.history[-5:])):
+            if st.button(f"↻ {q[:50]}", key=f"hist_{i}", use_container_width=True):
+                st.session_state.selected_example = q
+                st.rerun()
+    
+    # Счётчик оценок
+    if st.session_state.feedback:
+        st.markdown("---")
+        st.markdown("### 📊 Оценки")
+        ups = sum(1 for v in st.session_state.feedback.values() if v == 1)
+        downs = sum(1 for v in st.session_state.feedback.values() if v == 0)
+        st.markdown(f"👍 **{ups}** · 👎 **{downs}**")
 
 
 # ==================== ОСНОВНОЙ КОНТЕНТ ====================
 st.markdown('<h1 class="main-header">🏗️ Поиск по строительным нормам</h1>', unsafe_allow_html=True)
 st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
 
-# Примеры вопросов (клик заполняет поле, но НЕ запускает поиск)
+# Примеры вопросов
 st.markdown("**💡 Примеры вопросов:**")
 example_cols = st.columns(4)
 examples = [
@@ -213,7 +272,6 @@ for i, (label, query) in enumerate(examples):
 
 
 # ==================== ФОРМА ПОИСКА ====================
-# Enter в поле ввода = нажатие кнопки "Найти ответ"
 with st.form("search_form", clear_on_submit=False):
     question = st.text_input(
         "Ваш вопрос:",
@@ -237,27 +295,46 @@ if ask_button:
         if question not in st.session_state.history:
             st.session_state.history.append(question)
         
-        # Индикатор «⏳ Ищу…»
         status_placeholder = st.empty()
         status_placeholder.info("⏳ Ищу ответ в документах…")
 
         candidates = []
 
+        # Подготовка фильтра
+        where_filter = None
+        if selected_sources:
+            where_filter = {"source": {"$in": selected_sources}}
+
         # Векторный поиск
-        vector_results = collection.query(
-            query_texts=[question],
-            n_results=30
-        )
-        if vector_results['documents'] and vector_results['documents'][0]:
-            for i, doc in enumerate(vector_results['documents'][0]):
-                meta = vector_results['metadatas'][0][i]
-                candidates.append({
-                    'text': doc,
-                    'source': meta['source'],
-                    'section': meta.get('section', ''),
-                    'tables': meta.get('tables', ''),
-                    'type': 'векторный'
-                })
+        try:
+            vector_results = collection.query(
+                query_texts=[question],
+                n_results=30,
+                where=where_filter
+            )
+            if vector_results['documents'] and vector_results['documents'][0]:
+                for i, doc in enumerate(vector_results['documents'][0]):
+                    meta = vector_results['metadatas'][0][i]
+                    candidates.append({
+                        'text': doc,
+                        'source': meta['source'],
+                        'section': meta.get('section', ''),
+                        'tables': meta.get('tables', ''),
+                        'type': 'векторный'
+                    })
+        except Exception:
+            if where_filter:
+                vector_results = collection.query(query_texts=[question], n_results=30)
+                if vector_results['documents'] and vector_results['documents'][0]:
+                    for i, doc in enumerate(vector_results['documents'][0]):
+                        meta = vector_results['metadatas'][0][i]
+                        candidates.append({
+                            'text': doc,
+                            'source': meta['source'],
+                            'section': meta.get('section', ''),
+                            'tables': meta.get('tables', ''),
+                            'type': 'векторный (без фильтра)'
+                        })
 
         # Поиск по таблицам
         table_matches = re.findall(
@@ -275,6 +352,8 @@ if ask_button:
                     if table_results['documents']:
                         for i, doc in enumerate(table_results['documents']):
                             meta = table_results['metadatas'][i]
+                            if selected_sources and meta['source'] not in selected_sources:
+                                continue
                             candidates.append({
                                 'text': doc,
                                 'source': meta['source'],
@@ -287,20 +366,24 @@ if ask_button:
 
         # Поиск по ключевым словам
         if re.search(r'допуск|отклонени', question, re.IGNORECASE):
-            keyword_results = collection.query(
-                query_texts=["допуск отклонение не более мм"],
-                n_results=20
-            )
-            if keyword_results['documents'] and keyword_results['documents'][0]:
-                for i, doc in enumerate(keyword_results['documents'][0]):
-                    meta = keyword_results['metadatas'][0][i]
-                    candidates.append({
-                        'text': doc,
-                        'source': meta['source'],
-                        'section': meta.get('section', ''),
-                        'tables': meta.get('tables', ''),
-                        'type': 'ключевые слова'
-                    })
+            try:
+                keyword_results = collection.query(
+                    query_texts=["допуск отклонение не более мм"],
+                    n_results=20,
+                    where=where_filter
+                )
+                if keyword_results['documents'] and keyword_results['documents'][0]:
+                    for i, doc in enumerate(keyword_results['documents'][0]):
+                        meta = keyword_results['metadatas'][0][i]
+                        candidates.append({
+                            'text': doc,
+                            'source': meta['source'],
+                            'section': meta.get('section', ''),
+                            'tables': meta.get('tables', ''),
+                            'type': 'ключевые слова'
+                        })
+            except Exception:
+                pass
 
         # Фильтрация
         filtered = []
@@ -340,18 +423,18 @@ if ask_button:
             if ref not in sources:
                 sources.append(ref)
 
-        # Убираем индикатор
         status_placeholder.empty()
+
+        # Сохраняем в session_state
+        st.session_state.current_question = question
+        st.session_state.current_sources = sources
+        st.session_state.current_fragments = unique_filtered
 
         # Карточка с количеством фрагментов
         st.markdown(
             f'<div class="fragments-info">📖 Отобрано фрагментов: {len(unique_filtered)}</div>',
             unsafe_allow_html=True
         )
-        
-        with st.expander(f"📚 Показать источники ({len(sources)})", expanded=False):
-            for src in sources[:15]:
-                st.markdown(f"• {src}")
 
         # Промпт для ИИ
         prompt = f"""Не размышляй. Сразу давай ответ.
@@ -378,26 +461,74 @@ if ask_button:
                 )
 
             answer = response.choices[0].message.content
-
-            st.success("✅ Ответ найден!")
-            st.markdown("### 📖 Ответ:")
-            st.markdown(answer)
-
-            # Кнопка "Копировать ответ" — через st.code (без плагинов)
-            with st.expander("📋 Копировать ответ (нажми на иконку справа сверху)", expanded=False):
-                st.code(answer, language="markdown")
-
-            # Показ исходных фрагментов под ответом
-            with st.expander(f"🔍 Показать фрагменты, на которых основан ответ ({len(unique_filtered)})", expanded=False):
-                for i, c in enumerate(unique_filtered, 1):
-                    ref = c['source']
-                    if c['section']:
-                        ref += f", раздел {c['section']}"
-                    if c['tables']:
-                        ref += f", таблица {c['tables']}"
-                    st.markdown(f"**Фрагмент {i}** · *{ref}* · тип поиска: `{c['type']}`")
-                    st.markdown(f"> {c['text']}")
-                    st.markdown("---")
+            st.session_state.current_answer = answer
 
         except Exception as e:
             st.error(f"Произошла ошибка: {e}")
+            st.session_state.current_answer = None
+
+# ==================== ОТОБРАЖЕНИЕ РЕЗУЛЬТАТА ====================
+if st.session_state.current_answer:
+    question = st.session_state.current_question
+    answer = st.session_state.current_answer
+    sources = st.session_state.current_sources
+    unique_filtered = st.session_state.current_fragments
+
+    st.success("✅ Ответ найден!")
+    st.markdown("### 📖 Ответ:")
+    st.markdown(answer)
+
+    # ===== КНОПКИ ДЕЙСТВИЙ =====
+    action_cols = st.columns([1, 1, 1, 2])
+
+    # PDF скачивание
+    with action_cols[0]:
+        if IRONPRESS_OK:
+            try:
+                pdf_bytes = ironpress.markdown_to_pdf(
+                    f"# {question}\n\n{answer}\n\n---\n\n## Источники\n\n" +
+                    "\n".join(f"- {s}" for s in sources)
+                )
+                st.download_button(
+                    "💾 Скачать PDF",
+                    data=pdf_bytes,
+                    file_name=f"snip_answer_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    mime="application/pdf",
+                    key="dl_pdf"
+                )
+            except Exception as e:
+                st.caption(f"PDF недоступен: {e}")
+        else:
+            st.caption("PDF: установите ironpress")
+
+    # Копировать
+    with action_cols[1]:
+        with st.popover("📋 Копировать"):
+            st.code(answer, language="markdown")
+
+    # Обратная связь 👍/👎
+    with action_cols[2]:
+        fb = st.feedback("thumbs", key=f"fb_{hash(question)}")
+        if fb is not None:
+            st.session_state.feedback[question] = fb
+            if fb == 1:
+                st.toast("👍 Спасибо за оценку!")
+            else:
+                st.toast("👎 Спасибо, мы учтём это")
+
+    # Источники
+    with st.expander(f"📚 Показать источники ({len(sources)})", expanded=False):
+        for src in sources[:15]:
+            st.markdown(f"• {src}")
+
+    # Показ фрагментов
+    with st.expander(f"🔍 Показать фрагменты ({len(unique_filtered)})", expanded=False):
+        for i, c in enumerate(unique_filtered, 1):
+            ref = c['source']
+            if c['section']:
+                ref += f", раздел {c['section']}"
+            if c['tables']:
+                ref += f", таблица {c['tables']}"
+            st.markdown(f"**Фрагмент {i}** · *{ref}* · тип: `{c['type']}`")
+            st.markdown(f"> {c['text']}")
+            st.markdown("---")
