@@ -96,25 +96,79 @@ st.markdown("""
     
     /* ===== МОБИЛЬНАЯ АДАПТАЦИЯ ===== */
     @media (max-width: 768px) {
+        /* Заголовок — компактнее */
         .main-header {
-            font-size: 1.4rem;
+            font-size: 1.3rem !important;
+            line-height: 1.2;
+            margin-bottom: 0.3rem;
         }
         .main-subheader {
-            font-size: 0.9rem;
+            font-size: 0.85rem;
+            margin-bottom: 1rem;
+            line-height: 1.3;
         }
+        
+        /* Основной контейнер — меньше отступы */
         .block-container {
-            padding-top: 1rem;
-            padding-bottom: 1rem;
-            padding-left: 0.5rem;
-            padding-right: 0.5rem;
+            padding-top: 1rem !important;
+            padding-bottom: 3rem !important;
+            padding-left: 0.75rem !important;
+            padding-right: 0.75rem !important;
         }
+        
+        /* Сайдбар — не фиксировать ширину */
         [data-testid="stSidebar"] {
-            min-width: 85vw !important;
-            max-width: 85vw !important;
+            min-width: 0 !important;
+            max-width: 100% !important;
         }
-        .stButton > button {
-            font-size: 0.8rem;
+        [data-testid="stSidebar"] .doc-card {
+            font-size: 0.75rem;
             padding: 0.4rem 0.6rem;
+        }
+        
+        /* Кнопки-примеры: 2 в ряд */
+        [data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+            gap: 0.4rem !important;
+        }
+        [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+            min-width: calc(50% - 0.2rem) !important;
+            flex: 1 1 calc(50% - 0.2rem) !important;
+        }
+        
+        /* Кнопки — компактнее */
+        .stButton > button,
+        .stFormSubmitButton > button {
+            font-size: 0.85rem !important;
+            padding: 0.5rem 0.6rem !important;
+            min-height: 2.4rem;
+            white-space: normal !important;
+        }
+        
+        /* Кнопка "Найти ответ" — full-width */
+        .stFormSubmitButton > button {
+            width: 100% !important;
+            font-size: 1rem !important;
+            padding: 0.75rem !important;
+        }
+        
+        /* Поле ввода */
+        .stTextInput > div > div > input {
+            font-size: 1rem !important;
+            padding: 0.75rem !important;
+            min-height: 2.75rem;
+        }
+        
+        /* Карточка с фрагментами */
+        .fragments-info {
+            font-size: 0.85rem;
+            padding: 0.6rem 0.8rem;
+            margin: 0.75rem 0;
+        }
+        
+        /* Расширялки */
+        .stExpander summary {
+            font-size: 0.9rem !important;
         }
     }
 </style>
