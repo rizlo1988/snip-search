@@ -48,7 +48,6 @@ st.markdown("""
         border-radius: 8px;
         font-weight: 600;
         transition: all 0.3s;
-        white-space: nowrap;
     }
     .stButton > button:hover, .stFormSubmitButton > button:hover {
         transform: translateY(-2px);
@@ -126,30 +125,19 @@ st.markdown("""
             padding: 0.4rem 0.6rem;
         }
         
-        /* Кнопки-примеры: 2 в ряд */
-        [data-testid="stHorizontalBlock"] {
-            flex-wrap: wrap !important;
-            gap: 0.4rem !important;
-        }
-        [data-testid="stHorizontalBlock"] > [data-testid="column"] {
-            min-width: calc(50% - 0.2rem) !important;
-            flex: 1 1 calc(50% - 0.2rem) !important;
-        }
-        
         /* Кнопки — компактнее */
         .stButton > button,
         .stFormSubmitButton > button {
-            font-size: 0.85rem !important;
-            padding: 0.5rem 0.6rem !important;
-            min-height: 2.4rem;
-            white-space: normal !important;
+            font-size: 0.9rem !important;
+            padding: 0.6rem 0.8rem !important;
+            min-height: 2.6rem;
         }
         
-        /* Кнопка "Найти ответ" — full-width */
+        /* Кнопка "Найти ответ" — компактная, но крупная по высоте */
         .stFormSubmitButton > button {
-            width: 100% !important;
             font-size: 1rem !important;
-            padding: 0.75rem !important;
+            padding: 0.75rem 1.5rem !important;
+            min-height: 3rem !important;
         }
         
         /* Поле ввода */
@@ -166,7 +154,10 @@ st.markdown("""
             margin: 0.75rem 0;
         }
         
-        /* Расширялки */
+        /* Расширялки — компактнее */
+        .stExpander {
+            margin-bottom: 0.5rem !important;
+        }
         .stExpander summary {
             font-size: 0.9rem !important;
         }
@@ -308,9 +299,9 @@ with st.sidebar:
 st.markdown('<h1 class="main-header">🏗️ Поиск по строительным нормам</h1>', unsafe_allow_html=True)
 st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
 
-# Примеры вопросов
+# ==================== ПРИМЕРЫ ВОПРОСОВ (2×2) ====================
 st.markdown("**💡 Примеры вопросов:**")
-example_cols = st.columns(4)
+
 examples = [
     ("🏗️ Асфальт", "толщина слоя асфальта"),
     ("📏 Допуски", "допуски по кернам"),
@@ -318,8 +309,18 @@ examples = [
     ("🌉 Мосты", "требования к мостам"),
 ]
 
-for i, (label, query) in enumerate(examples):
-    with example_cols[i]:
+# Ряд 1 — первые два примера
+row1 = st.columns(2)
+for i, (label, query) in enumerate(examples[:2]):
+    with row1[i]:
+        if st.button(label, key=f"ex_{i}", use_container_width=True):
+            st.session_state.selected_example = query
+            st.rerun()
+
+# Ряд 2 — вторые два примера
+row2 = st.columns(2)
+for i, (label, query) in enumerate(examples[2:], start=2):
+    with row2[i - 2]:
         if st.button(label, key=f"ex_{i}", use_container_width=True):
             st.session_state.selected_example = query
             st.rerun()
