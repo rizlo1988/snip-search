@@ -24,14 +24,14 @@ st.markdown("""
     /* Заголовок */
     .main-header {
         color: #1e3a8a;
-        font-size: 2.5rem;
+        font-size: 2rem;
         font-weight: 700;
         margin-bottom: 0.5rem;
     }
     .main-subheader {
         color: #475569;
-        font-size: 1.1rem;
-        margin-bottom: 2rem;
+        font-size: 1rem;
+        margin-bottom: 1.5rem;
     }
     
     /* Кнопки */
@@ -40,9 +40,10 @@ st.markdown("""
         color: white;
         border: none;
         border-radius: 8px;
-        padding: 0.6rem 1.5rem;
+        padding: 0.5rem 1rem;
         font-weight: 600;
         transition: all 0.3s;
+        white-space: nowrap;
     }
     .stButton > button:hover {
         transform: translateY(-2px);
@@ -61,43 +62,38 @@ st.markdown("""
         box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
     }
     
-    /* Карточки примеров */
-    .example-btn {
+    /* Сайдбар — узкий */
+    [data-testid="stSidebar"] {
         background: white;
-        border: 1px solid #e2e8f0;
-        border-radius: 8px;
-        padding: 0.5rem 1rem;
-        margin: 0.25rem;
-        cursor: pointer;
-        transition: all 0.2s;
-    }
-    .example-btn:hover {
-        border-color: #2563eb;
-        background: #eff6ff;
-    }
-    
-    /* Сайдбар */
-    .css-1d391kg, [data-testid="stSidebar"] {
-        background: white;
+        min-width: 260px !important;
+        max-width: 300px !important;
     }
     
     /* Карточки документов */
     .doc-card {
         background: #f8fafc;
         border-left: 4px solid #2563eb;
-        padding: 0.6rem 1rem;
-        margin-bottom: 0.5rem;
+        padding: 0.5rem 0.75rem;
+        margin-bottom: 0.4rem;
         border-radius: 6px;
-        font-size: 0.9rem;
+        font-size: 0.8rem;
+        line-height: 1.3;
     }
     
-    /* Ответ */
-    .answer-box {
-        background: white;
-        border-radius: 12px;
-        padding: 1.5rem;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-        margin-top: 1rem;
+    /* Карточка с количеством фрагментов */
+    .fragments-info {
+        background: #eff6ff;
+        border-radius: 8px;
+        padding: 0.75rem 1rem;
+        margin: 1rem 0;
+        color: #1e40af;
+        font-weight: 600;
+    }
+    
+    /* Уменьшаем отступы */
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -158,28 +154,22 @@ def count_sources():
 
 sources_list = count_sources()
 
-# ==================== ИСТОРИЯ ВОПРОСОВ ====================
+# ==================== ИНИЦИАЛИЗАЦИЯ SESSION STATE ====================
 if "history" not in st.session_state:
     st.session_state.history = []
+if "selected_example" not in st.session_state:
+    st.session_state.selected_example = ""
+if "last_question" not in st.session_state:
+    st.session_state.last_question = ""
 
 # ==================== САЙДБАР ====================
 with st.sidebar:
     st.markdown("## 📚 База знаний")
-    
-    # Счётчик документов
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        st.markdown(f"### {len(sources_list)}")
-    with col2:
-        st.markdown("**документов**")
-        st.markdown("*загружено в базу*")
-    
+    st.markdown(f"**{len(sources_list)}** документов загружено")
     st.markdown("---")
     
-    # Список документов в карточках
     st.markdown("### 📄 Документы")
     for src in sources_list:
-        # Определяем иконку по типу
         if "ГОСТ" in src:
             icon = "📘"
         elif "СП" in src:
@@ -187,15 +177,13 @@ with st.sidebar:
         else:
             icon = "📄"
         
-        # Убираем .txt из имени
         display_name = src.replace(".txt", "")
         
         st.markdown(
-            f'<div class="doc-card">{icon} <b>{display_name}</b></div>',
+            f'<div class="doc-card">{icon} {display_name}</div>',
             unsafe_allow_html=True
         )
     
-    # История
     if st.session_state.history:
         st.markdown("---")
         st.markdown("### 🕐 История")
@@ -211,47 +199,46 @@ st.markdown('<p class="main-subheader">Задайте вопрос — прог�
 st.markdown("**💡 Примеры вопросов:**")
 example_cols = st.columns(4)
 examples = [
-    "толщина слоя асфальта",
-    "допуски по кернам",
-    "поперечный уклон дороги",
-    "требования к мостам"
+    ("🏗️ Асфальт", "толщина слоя асфальта"),
+    ("📏 Допуски", "допуски по кернам"),
+    ("🛣️ Уклон", "поперечный уклон дороги"),
+    ("🌉 Мосты", "требования к мостам"),
 ]
 
-if "selected_example" not in st.session_state:
-    st.session_state.selected_example = ""
-
-for i, ex in enumerate(examples):
+for i, (label, query) in enumerate(examples):
     with example_cols[i]:
-        if st.button(ex, key=f"ex_{i}", use_container_width=True):
-            st.session_state.selected_example = ex
+        if st.button(label, key=f"ex_{i}", use_container_width=True):
+            st.session_state.selected_example = query
+            st.rerun()
 
-# Поле ввода
+# Поле ввода — берёт значение из selected_example
 question = st.text_input(
     "Ваш вопрос:",
     value=st.session_state.selected_example,
     placeholder="Например: допуски по асфальту",
-    key="question_input"
+    key="question_field"
 )
 
-# Кнопка
-col1, col2 = st.columns([1, 4])
-with col1:
-    ask_button = st.button("🔍 Найти ответ", type="primary", use_container_width=True)
+# Сбрасываем selected_example после отрисовки поля
+if st.session_state.selected_example:
+    st.session_state.selected_example = ""
 
-# Обработка Enter (кнопка или Enter)
-if ask_button or (question and question != st.session_state.selected_example and st.session_state.get("last_question") != question):
+# Кнопка
+ask_button = st.button("🔍 Найти ответ", type="primary")
+
+# Обработка: кнопка нажата
+if ask_button:
     if not question.strip():
         st.warning("Пожалуйста, введите вопрос.")
     else:
         # Сохраняем в историю
         if question not in st.session_state.history:
             st.session_state.history.append(question)
-        st.session_state.last_question = question
-        st.session_state.selected_example = ""
         
         with st.spinner("Ищу ответ в документах..."):
             candidates = []
 
+            # Векторный поиск
             vector_results = collection.query(
                 query_texts=[question],
                 n_results=30
@@ -267,6 +254,7 @@ if ask_button or (question and question != st.session_state.selected_example and
                         'type': 'векторный'
                     })
 
+            # Поиск по таблицам
             table_matches = re.findall(
                 r'таблиц[аы]?\s*([А-ЯA-Z]?\.?\d+(?:\.\d+)?)',
                 question,
@@ -292,6 +280,7 @@ if ask_button or (question and question != st.session_state.selected_example and
                     except Exception:
                         pass
 
+            # Поиск по ключевым словам
             if re.search(r'допуск|отклонени', question, re.IGNORECASE):
                 keyword_results = collection.query(
                     query_texts=["допуск отклонение не более мм"],
@@ -308,6 +297,7 @@ if ask_button or (question and question != st.session_state.selected_example and
                             'type': 'ключевые слова'
                         })
 
+            # Фильтрация
             filtered = []
             for c in candidates:
                 text_lower = c['text'].lower()
@@ -322,6 +312,7 @@ if ask_button or (question and question != st.session_state.selected_example and
             if not filtered:
                 filtered = candidates
 
+            # Убираем дубли
             seen = set()
             unique_filtered = []
             for c in filtered:
@@ -331,6 +322,7 @@ if ask_button or (question and question != st.session_state.selected_example and
 
             unique_filtered = unique_filtered[:25]
 
+            # Формируем контекст
             context = ""
             sources = []
             for c in unique_filtered:
@@ -343,17 +335,17 @@ if ask_button or (question and question != st.session_state.selected_example and
                 if ref not in sources:
                     sources.append(ref)
 
-            # Красивая карточка с источниками
-            st.markdown(f"""
-            <div style="background: #eff6ff; border-radius: 8px; padding: 1rem; margin: 1rem 0;">
-                <b>📖 Отобрано фрагментов:</b> {len(unique_filtered)}
-            </div>
-            """, unsafe_allow_html=True)
+            # Карточка с количеством фрагментов
+            st.markdown(
+                f'<div class="fragments-info">📖 Отобрано фрагментов: {len(unique_filtered)}</div>',
+                unsafe_allow_html=True
+            )
             
             with st.expander(f"📚 Показать источники ({len(sources)})", expanded=False):
                 for src in sources[:15]:
                     st.markdown(f"• {src}")
 
+            # Промпт для ИИ
             prompt = f"""Не размышляй. Сразу давай ответ.
 Ты — эксперт по строительным нормам и правилам.
 Отвечай подробно. Приведи ВСЕ найденные допуски и отклонения из фрагментов.
