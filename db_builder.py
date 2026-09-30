@@ -7,10 +7,10 @@ DOCS_FOLDER = "documents"
 DB_PATH = "./chroma_db"
 COLLECTION_NAME = "snip_docs"
 
-# Модель эмбеддингов (B: ru-en-RoSBERTa)
-EMBEDDING_MODEL = "ai-forever/ru-en-RoSBERTa"
+# ✅ БЫСТРАЯ модель (30 МБ) — не падает по памяти
+EMBEDDING_MODEL = "sergeyzh/rubert-tiny-turbo"
 
-# Максимальный размер чанка (C: гибрид)
+# Максимальный размер чанка (гибрид)
 MAX_CHUNK_SIZE = 1500
 MIN_CHUNK_SIZE = 100
 
@@ -32,19 +32,13 @@ def parse_document(text, filename):
     lines = text.split('\n')
     total_lines = len(lines)
 
-    # Регулярные выражения для структуры
-    # Раздел: "1 Область применения", "12 Устройство асфальтобетонных покрытий"
+    # Регулярные выражения
     chapter_re = re.compile(r'^(\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{3,80})$')
-    # Подраздел: "7.1 Общие положения", "12.3 Укладка асфальтобетонных смесей"
     section_re = re.compile(r'^(\d{1,2}\.\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{3,80})$')
-    # Пункт: "7.1.1 ...", "12.2.4 ...", "8.28 ..."
     point_re = re.compile(r'^(\d{1,2}(?:\.\d{1,2}){1,3})\s+')
-    # Таблица: "Таблица 1", "Таблица 9", "Таблица 5.1", "Таблица 11а"
     table_re = re.compile(r'^Таблица\s+([А-ЯA-Z]?\.?\d+(?:\.\d+)?[а-яa-z]?)')
-    # Приложение: "Приложение А", "Приложение Б (обязательное)"
     appendix_re = re.compile(r'^Приложение\s+([А-ЯA-Z])')
 
-    # Текущее состояние парсинга
     current_chapter = ""
     current_chapter_title = ""
     current_section = ""
@@ -54,7 +48,6 @@ def parse_document(text, filename):
     current_start_line = 0
 
     def flush_buffer(end_line, is_table=False, table_num=""):
-        """Сохраняет накопленный буфер как чанк."""
         nonlocal current_buffer, current_start_line
         if not current_buffer:
             return
@@ -64,7 +57,6 @@ def parse_document(text, filename):
             current_start_line = end_line
             return
 
-        # Если чанк слишком большой — режем на части
         if len(chunk_text) > MAX_CHUNK_SIZE:
             for sub_chunk in split_large_chunk(chunk_text, MAX_CHUNK_SIZE):
                 add_chunk(sub_chunk, is_table, table_num)
@@ -75,7 +67,6 @@ def parse_document(text, filename):
         current_start_line = end_line
 
     def add_chunk(chunk_text, is_table=False, table_num=""):
-        """Добавляет чанк в список."""
         chunks.append({
             "text": chunk_text,
             "source": filename,
@@ -95,16 +86,12 @@ def parse_document(text, filename):
         line = lines[i]
         stripped = line.strip()
 
-        # Проверяем — не исключён ли пункт
-        is_excluded = bool(re.search(r'\(Исключен[а]?,?\s', stripped) or
-                          re.search(r'\(Исключен[а]?,?\s', stripped))
+        is_excluded = bool(re.search(r'\(Исключен[а]?,?\s', stripped))
 
         # 1. Новая таблица?
         table_match = table_re.match(stripped)
         if table_match:
-            # Сохраняем накопленное
             flush_buffer(i)
-            # Собираем таблицу целиком
             table_lines = [line]
             table_num = table_match.group(1)
             j = i + 1
@@ -112,7 +99,6 @@ def parse_document(text, filename):
             while j < total_lines:
                 next_line = lines[j]
                 next_stripped = next_line.strip()
-                # Таблица заканчивается на пустой строке или заголовке
                 if not next_stripped:
                     empty_count += 1
                     if empty_count >= 2:
@@ -176,20 +162,17 @@ def parse_document(text, filename):
             i += 1
             continue
 
-        # 6. Продолжение текущего пункта
+        # 6. Продолжение пункта
         if current_buffer or current_point:
             current_buffer.append(line)
         elif stripped:
-            # Начало документа без структуры (введение, предисловие)
             if not current_buffer:
                 current_start_line = i
             current_buffer.append(line)
 
         i += 1
 
-    # Сохраняем последний буфер
     flush_buffer(total_lines)
-
     return chunks
 
 
@@ -205,7 +188,6 @@ def split_large_chunk(text, max_size):
             if current:
                 parts.append(current)
             if len(p) > max_size:
-                # Режем абзац по предложениям
                 sentences = re.split(r'(?<=[.!?])\s+', p)
                 sub = ""
                 for s in sentences:
@@ -229,7 +211,6 @@ def split_large_chunk(text, max_size):
 def build_database(progress_callback=None):
     client = chromadb.PersistentClient(path=DB_PATH)
 
-    # Новая модель эмбеддингов
     ru_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name=EMBEDDING_MODEL
     )
@@ -268,7 +249,6 @@ def build_database(progress_callback=None):
         if progress_callback:
             progress_callback(f"  {filename}: разбит на {len(chunks)} чанков")
 
-        # Батчами по 100 для скорости
         BATCH_SIZE = 100
         for batch_start in range(0, len(chunks), BATCH_SIZE):
             batch = chunks[batch_start:batch_start + BATCH_SIZE]
