@@ -42,7 +42,6 @@ st.markdown("""
     }
     .source-ref { font-size: 0.85rem; color: var(--primary-color); margin-bottom: 0.4rem; font-weight: 600; }
     .block-container { padding-top: 1rem; padding-bottom: 2rem; }
-    /* Плашка «База собрана» */
     .db-status {
         background: var(--secondary-background-color);
         border-left: 4px solid #22c55e;
@@ -101,7 +100,7 @@ def load_collection():
             def show_progress(msg):
                 progress_placeholder.info(msg)
             build_database(progress_callback=show_progress)
-            progress_placeholder.success("✅ База собрана!")
+            progress_placeholder.empty()
 
     chroma_client = chromadb.PersistentClient(path=DB_PATH)
     return chroma_client.get_collection(name=COLLECTION_NAME)
@@ -123,8 +122,7 @@ def count_sources():
 sources_list = count_sources()
 
 
-# ✅ Фильтр «мусорных» разделов
-TRASH_CHAPTERS = {'1', '2'}  # Область применения, Нормативные ссылки
+TRASH_CHAPTERS = {'1', '2'}
 TRASH_TITLE_PATTERNS = [
     re.compile(r'Нормативные ссылки', re.IGNORECASE),
     re.compile(r'Область применения', re.IGNORECASE),
@@ -132,7 +130,6 @@ TRASH_TITLE_PATTERNS = [
 
 
 def is_trash_fragment(c, is_definition_question=False):
-    """Проверяет, является ли фрагмент мусором для выдачи."""
     ch = c.get('chapter', '')
     ch_title = c.get('chapter_title', '')
 
@@ -164,7 +161,6 @@ def search_and_answer(question, selected_sources):
         question, re.IGNORECASE
     ))
 
-    # Векторный поиск
     try:
         vector_results = collection.query(
             query_texts=[question],
@@ -189,7 +185,6 @@ def search_and_answer(question, selected_sources):
     except Exception:
         pass
 
-    # Таблицы
     table_matches = re.findall(
         r'таблиц[аы]?\s*([А-ЯA-Z]?\.?\d+(?:\.\d+)?)',
         question, re.IGNORECASE
@@ -221,7 +216,6 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-    # Ключевые слова
     if re.search(r'допуск|отклонени', question, re.IGNORECASE):
         try:
             keyword_results = collection.query(
@@ -247,7 +241,6 @@ def search_and_answer(question, selected_sources):
         except Exception:
             pass
 
-    # Дедупликация
     seen = set()
     unique_candidates = []
     for c in candidates:
@@ -331,7 +324,6 @@ def search_and_answer(question, selected_sources):
     return answer, sources_set, unique_filtered
 
 
-# ==================== SESSION STATE ====================
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "history" not in st.session_state:
@@ -342,9 +334,7 @@ if "pending_question" not in st.session_state:
     st.session_state.pending_question = ""
 
 
-# ==================== САЙДБАР ====================
 with st.sidebar:
-    # ✅ Плашка «База собрана» — НАД фильтром
     st.markdown(
         f'<div class="db-status">✅ База собрана · {len(sources_list)} документов</div>',
         unsafe_allow_html=True
@@ -405,12 +395,9 @@ with st.sidebar:
         st.markdown(f"👍 **{ups}** · 👎 **{downs}**")
 
 
-# ==================== ОСНОВНОЙ КОНТЕНТ ====================
-# Заголовок — поднят выше (уменьшен padding-top у block-container)
 st.markdown('<h1 class="main-header">🏗️ Поиск по СНиПам</h1>', unsafe_allow_html=True)
 st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
 
-# ✅ Поле ввода — ПОД заголовком (text_input вместо chat_input)
 prefill = st.session_state.pending_question
 st.session_state.pending_question = ""
 
@@ -426,14 +413,9 @@ with input_cols[0]:
 with input_cols[1]:
     ask_clicked = st.button("🔍 Спросить", use_container_width=True, type="primary")
 
-# Enter в text_input = отправка (в Streamlit это работает через submit через rerun + флаг)
-# Определяем, был ли ввод
 user_input = None
 if ask_clicked and user_input_text.strip():
     user_input = user_input_text.strip()
-elif prefill and not ask_clicked:
-    # Если prefill пришёл из истории/примеров, но пользователь не нажал кнопку — не отправляем автоматически
-    pass
 
 
 if not st.session_state.messages:
