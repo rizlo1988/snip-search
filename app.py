@@ -42,7 +42,7 @@ st.markdown("""
         color: var(--primary-color); font-weight: 600;
     }
     .source-ref { font-size: 0.85rem; color: var(--primary-color); margin-bottom: 0.4rem; font-weight: 600; }
-    .block-container { padding-top: 1rem; padding-bottom: 2rem; }
+    .block-container { padding-top: 1rem; padding-bottom: 4rem; }
     .db-status {
         background: var(--secondary-background-color);
         border-left: 4px solid #22c55e;
@@ -53,10 +53,30 @@ st.markdown("""
         color: var(--text-color);
         margin-bottom: 0.75rem;
     }
+    /* ✅ Кнопка «Очистить историю» в нижнем левом углу */
+    .clear-history-wrap {
+        position: fixed;
+        bottom: 1rem;
+        left: 1rem;
+        z-index: 9999;
+    }
+    .clear-history-wrap button {
+        background: var(--secondary-background-color) !important;
+        color: var(--text-color) !important;
+        border: 1px solid rgba(128,128,128,0.3) !important;
+        border-radius: 8px !important;
+        font-size: 0.85rem !important;
+        padding: 0.5rem 0.75rem !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15) !important;
+    }
+    .clear-history-wrap button:hover {
+        background: var(--primary-color) !important;
+        color: white !important;
+    }
     @media (max-width: 768px) {
         .main-header { font-size: 1.3rem !important; line-height: 1.2; margin-bottom: 0.3rem; }
         .main-subheader { font-size: 0.85rem; margin-bottom: 0.75rem; line-height: 1.3; }
-        .block-container { padding-top: 0.75rem !important; padding-bottom: 3rem !important; padding-left: 0.75rem !important; padding-right: 0.75rem !important; }
+        .block-container { padding-top: 0.75rem !important; padding-bottom: 4rem !important; padding-left: 0.75rem !important; padding-right: 0.75rem !important; }
         [data-testid="stSidebar"] { min-width: 0 !important; max-width: 100% !important; }
         [data-testid="stSidebar"] .doc-card { font-size: 0.75rem; padding: 0.4rem 0.6rem; }
         .stButton > button, .stFormSubmitButton > button { font-size: 0.9rem !important; padding: 0.6rem 0.8rem !important; min-height: 2.6rem; }
@@ -66,6 +86,8 @@ st.markdown("""
         .stExpander { margin-bottom: 0.5rem !important; }
         .stExpander summary { font-size: 0.9rem !important; }
         .db-status { font-size: 0.8rem; padding: 0.4rem 0.6rem; }
+        .clear-history-wrap { bottom: 0.5rem; left: 0.5rem; }
+        .clear-history-wrap button { font-size: 0.75rem !important; padding: 0.4rem 0.6rem !important; }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -162,6 +184,7 @@ def search_and_answer(question, selected_sources):
         question, re.IGNORECASE
     ))
 
+    # 1) Векторный поиск
     try:
         vector_results = collection.query(
             query_texts=[question],
@@ -186,6 +209,7 @@ def search_and_answer(question, selected_sources):
     except Exception:
         pass
 
+    # 2) Поиск по конкретным таблицам (если упомянуты в вопросе)
     table_matches = re.findall(
         r'таблиц[аы]?\s*([А-ЯA-Z]?\.?\d+(?:\.\d+)?)',
         question, re.IGNORECASE
@@ -217,16 +241,20 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-    if re.search(r'допуск|отклонени', question, re.IGNORECASE):
+    # 3) Поиск по таблицам с допусками (отметки, ширины, уклоны)
+    if re.search(r'допуск|отклонени|отметк|ширин|уклон', question, re.IGNORECASE):
         try:
-            keyword_results = collection.query(
-                query_texts=["допуск отклонение не более мм"],
-                n_results=20,
-                where=where_filter
+            table_query = collection.get(
+                where_document={"$contains": "Таблица"},
+                limit=50
             )
-            if keyword_results['documents'] and keyword_results['documents'][0]:
-                for i, doc in enumerate(keyword_results['documents'][0]):
-                    meta = keyword_results['metadatas'][0][i]
+            if table_query['documents']:
+                for i, doc in enumerate(table_query['documents']):
+                    if not re.search(r'допуск|отклонени|отметк|ширин|уклон', doc, re.IGNORECASE):
+                        continue
+                    meta = table_query['metadatas'][i]
+                    if selected_sources and meta.get('source') not in selected_sources:
+                        continue
                     candidates.append({
                         'text': doc,
                         'source': meta.get('source', ''),
@@ -235,13 +263,14 @@ def search_and_answer(question, selected_sources):
                         'section': meta.get('section', ''),
                         'section_title': meta.get('section_title', ''),
                         'point': meta.get('point', ''),
-                        'is_table': meta.get('is_table', False),
+                        'is_table': True,
                         'table_number': meta.get('table_number', ''),
-                        'type': 'ключевые слова'
+                        'type': 'таблица допусков'
                     })
         except Exception:
             pass
 
+    # Дедупликация
     seen = set()
     unique_candidates = []
     for c in candidates:
@@ -297,6 +326,18 @@ def search_and_answer(question, selected_sources):
 1. Отвечай ТОЛЬКО на основе фрагментов ниже. Не выдумывай.
 2. Если во фрагментах нет ответа — честно скажи: «В найденных фрагментах нет полного ответа».
 3. Отвечай структурированно, по пунктам.
+
+ОСОБОЕ ВНИМАНИЕ (если вопрос про допуски/отклонения):
+- Ищи ВСЕ виды допусков, а не только первый попавшийся:
+  * допуски на высотные отметки
+  * допуски на ширину (покрытия, слоя, конструкции)
+  * допуски на уклоны (продольные, поперечные)
+  * допуски на ровность
+  * допуски на толщину слоёв
+  * допуски на прямолинейность
+- В таблицах обычно перечислены ВСЕ допуски — проверь их.
+- Если в найденных фрагментах нет какого-то вида допусков — честно скажи,
+  каких именно допусков нет.
 
 ФОРМАТ ОТВЕТА (для каждого требования):
 - **Документ:** полное название (например, «СП 78.13330.2012 Автомобильные дороги»)
@@ -425,8 +466,17 @@ if ask_clicked and user_input_text.strip():
 # ==================== ЧАТ (ОТВЕТЫ) ====================
 chat_container = st.container()
 
-# Если есть новый вопрос — обрабатываем ДО рендера чата, но ответ добавляем в messages
 if user_input:
+    if re.search(r'допуск|отклонени', user_input, re.IGNORECASE) and len(user_input.split()) < 4:
+        st.info(
+            "💡 Уточните: допуски на что?\n\n"
+            "Например:\n"
+            "- «допуски на высотные отметки»\n"
+            "- «допуски на ширину покрытия»\n"
+            "- «допуски на поперечный уклон»\n"
+            "- «допуски на ровность»"
+        )
+
     st.session_state.messages.append({"role": "user", "content": user_input})
     if user_input not in st.session_state.history:
         st.session_state.history.append(user_input)
@@ -460,7 +510,6 @@ if user_input:
                         "fragments": []
                     })
 
-# Рендер всей истории (включая только что добавленный ответ)
 with chat_container:
     for idx, msg in enumerate(st.session_state.messages):
         if msg["role"] == "user":
@@ -535,3 +584,16 @@ with chat_container:
                             st.markdown(f'<div class="source-ref">📄 {ref}</div>', unsafe_allow_html=True)
                             st.markdown(f"> {c['text'][:1500]}")
                             st.markdown("---")
+
+
+# ==================== КНОПКА «ОЧИСТИТЬ ИСТОРИЮ» (нижний левый угол) ====================
+# Рендерим её ПОСЛЕ всего контента, но фиксируем через CSS
+clear_col = st.container()
+with clear_col:
+    st.markdown('<div class="clear-history-wrap">', unsafe_allow_html=True)
+    if st.button("🗑️ Очистить историю", key="clear_history_btn"):
+        st.session_state.messages = []
+        st.session_state.history = []
+        st.session_state.feedback = {}
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
