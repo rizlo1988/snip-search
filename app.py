@@ -164,6 +164,7 @@ def search_and_answer(question, selected_sources):
         question, re.IGNORECASE
     ))
 
+    # 1) Векторный поиск
     try:
         vector_results = collection.query(
             query_texts=[question],
@@ -188,6 +189,7 @@ def search_and_answer(question, selected_sources):
     except Exception:
         pass
 
+    # 2) Поиск по конкретным таблицам (если упомянуты в вопросе)
     table_matches = re.findall(
         r'таблиц[аы]?\s*([А-ЯA-Z]?\.?\d+(?:\.\d+)?)',
         question, re.IGNORECASE
@@ -219,34 +221,55 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-    if re.search(r'допуск|отклонени|отметк|ширин|уклон', question, re.IGNORECASE):
-        try:
-            table_query = collection.get(
-                where_document={"$contains": "Таблица"},
-                limit=50
-            )
-            if table_query['documents']:
-                for i, doc in enumerate(table_query['documents']):
-                    if not re.search(r'допуск|отклонени|отметк|ширин|уклон', doc, re.IGNORECASE):
-                        continue
-                    meta = table_query['metadatas'][i]
-                    if selected_sources and meta.get('source') not in selected_sources:
-                        continue
-                    candidates.append({
-                        'text': doc,
-                        'source': meta.get('source', ''),
-                        'chapter': meta.get('chapter', ''),
-                        'chapter_title': meta.get('chapter_title', ''),
-                        'section': meta.get('section', ''),
-                        'section_title': meta.get('section_title', ''),
-                        'point': meta.get('point', ''),
-                        'is_table': True,
-                        'table_number': meta.get('table_number', ''),
-                        'type': 'таблица допусков'
-                    })
-        except Exception:
-            pass
+    # 3) ✅ Универсальный поиск по маркерам таблиц/приложений/допусков
+    # Работает для всех документов: СП 78, СП 46, СП 70, СП 34, СП 126, ГОСТ 51872
+    if re.search(
+        r'допуск|отклонени|отметк|ширин|уклон|ровност|толщин|'
+        r'предельн|значени|параметр|размер|погрешн|расстоян|'
+        r'таблиц|приложени',
+        question, re.IGNORECASE
+    ):
+        # Маркеры таблиц и приложений — универсальные для всех СП/ГОСТ
+        markers = [
+            "Приложение",
+            "Таблица",
+            "Допускаемые отклонения",
+            "Допускаемые значения",
+            "Предельные отклонения",
+            "просвет под рейкой",
+            "Не более",
+        ]
 
+        for marker in markers:
+            try:
+                marker_query = collection.get(
+                    where_document={"$contains": marker},
+                    limit=15
+                )
+                if marker_query['documents']:
+                    for i, doc in enumerate(marker_query['documents']):
+                        meta = marker_query['metadatas'][i]
+                        if selected_sources and meta.get('source') not in selected_sources:
+                            continue
+                        # Фильтр: оставляем только те, где есть цифры-допуски
+                        if not re.search(r'[±]|\d+\s*мм|\d+,\d+', doc):
+                            continue
+                        candidates.append({
+                            'text': doc,
+                            'source': meta.get('source', ''),
+                            'chapter': meta.get('chapter', ''),
+                            'chapter_title': meta.get('chapter_title', ''),
+                            'section': meta.get('section', ''),
+                            'section_title': meta.get('section_title', ''),
+                            'point': meta.get('point', ''),
+                            'is_table': True,
+                            'table_number': meta.get('table_number', ''),
+                            'type': f'маркер: {marker[:30]}'
+                        })
+            except Exception:
+                pass
+
+    # Дедупликация
     seen = set()
     unique_candidates = []
     for c in candidates:
@@ -342,7 +365,6 @@ def search_and_answer(question, selected_sources):
     return answer, sources_set, unique_filtered
 
 
-# ==================== SESSION STATE ====================
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "history" not in st.session_state:
@@ -351,12 +373,10 @@ if "feedback" not in st.session_state:
     st.session_state.feedback = {}
 if "pending_question" not in st.session_state:
     st.session_state.pending_question = ""
-# ✅ Счётчик для смены key поля ввода (чтобы очищать без rerun)
 if "input_version" not in st.session_state:
     st.session_state.input_version = 0
 
 
-# ==================== САЙДБАР ====================
 with st.sidebar:
     st.markdown(
         f'<div class="db-status">✅ База собрана · {len(sources_list)} документов</div>',
@@ -420,11 +440,9 @@ with st.sidebar:
         st.markdown(f"👍 **{ups}** · 👎 **{downs}**")
 
 
-# ==================== ЗАГОЛОВОК + ФОРМА ====================
 st.markdown('<h1 class="main-header">🏗️ Поиск по СНиПам</h1>', unsafe_allow_html=True)
 st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
 
-# ✅ Ключ поля зависит от input_version — при инкременте поле очищается
 input_key = f"question_input_{st.session_state.input_version}"
 prefill_value = st.session_state.pending_question if st.session_state.pending_question else ""
 st.session_state.pending_question = ""
@@ -447,7 +465,6 @@ if ask_clicked and user_input_text.strip():
     user_input = user_input_text.strip()
 
 
-# ==================== ЧАТ ====================
 chat_container = st.container()
 
 if user_input:
@@ -483,7 +500,6 @@ if user_input:
                         "fragments": fragments
                     })
 
-                    # ✅ Меняем версию ключа → поле очистится БЕЗ rerun
                     st.session_state.input_version += 1
 
                 except Exception as e:
