@@ -12,10 +12,9 @@ try:
 except ImportError:
     IRONPRESS_OK = False
 
-# ✅ Иконка вкладки браузера — картинка из папки assets
 st.set_page_config(
     page_title="Поиск по СНиПам",
-    page_icon="assets/scale_1200.jpeg",
+    page_icon="📐",
     layout="wide",
     initial_sidebar_state="auto"
 )
@@ -470,16 +469,8 @@ with st.sidebar:
         st.markdown(f"👍 **{ups}** · 👎 **{downs}**")
 
 
-# ✅ Заголовок с картинкой из assets
-header_cols = st.columns([1, 12])
-with header_cols[0]:
-    try:
-        st.image("assets/scale_1200.jpeg", width=70)
-    except Exception:
-        st.markdown("📐")
-with header_cols[1]:
-    st.markdown('<h1 class="main-header">Поиск по СНиПам</h1>', unsafe_allow_html=True)
-
+# ✅ Заголовок с эмодзи
+st.markdown('<h1 class="main-header">📐 Поиск по СНиПам</h1>', unsafe_allow_html=True)
 st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
 
 input_key = f"question_input_{st.session_state.input_version}"
