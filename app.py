@@ -12,9 +12,10 @@ try:
 except ImportError:
     IRONPRESS_OK = False
 
+# ✅ Иконка вкладки браузера — картинка из папки assets
 st.set_page_config(
     page_title="Поиск по СНиПам",
-    page_icon="🏗️",
+    page_icon="assets/scale_1200.jpeg",
     layout="wide",
     initial_sidebar_state="auto"
 )
@@ -189,7 +190,7 @@ def search_and_answer(question, selected_sources):
     except Exception:
         pass
 
-    # 2) Поиск по конкретным таблицам (если упомянуты в вопросе)
+    # 2) Поиск по конкретным таблицам
     table_matches = re.findall(
         r'таблиц[аы]?\s*([А-ЯA-Z]?\.?\d+(?:\.\d+)?)',
         question, re.IGNORECASE
@@ -221,7 +222,7 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-    # 3) ✅ Универсальный поиск по маркерам таблиц/приложений/допусков
+    # 3) Универсальный поиск по маркерам таблиц/приложений/допусков
     if re.search(
         r'допуск|отклонени|отметк|ширин|уклон|ровност|толщин|'
         r'предельн|значени|параметр|размер|погрешн|расстоян|'
@@ -236,13 +237,19 @@ def search_and_answer(question, selected_sources):
             "Предельные отклонения",
             "просвет под рейкой",
             "Не более",
+            "Высотные отметки",
+            "Толщина слоя",
+            "Поперечные уклоны",
+            "Ширина слоя",
+            "Превышение граней",
+            "Прямолинейность",
         ]
 
         for marker in markers:
             try:
                 marker_query = collection.get(
                     where_document={"$contains": marker},
-                    limit=15
+                    limit=30
                 )
                 if marker_query['documents']:
                     for i, doc in enumerate(marker_query['documents']):
@@ -265,6 +272,32 @@ def search_and_answer(question, selected_sources):
                         })
             except Exception:
                 pass
+
+        # Специальный поиск по "Приложение А" СП 78
+        try:
+            app_a_query = collection.get(
+                where_document={"$contains": "Приложение А"},
+                limit=30
+            )
+            if app_a_query['documents']:
+                for i, doc in enumerate(app_a_query['documents']):
+                    meta = app_a_query['metadatas'][i]
+                    if selected_sources and meta.get('source') not in selected_sources:
+                        continue
+                    candidates.append({
+                        'text': doc,
+                        'source': meta.get('source', ''),
+                        'chapter': meta.get('chapter', ''),
+                        'chapter_title': meta.get('chapter_title', ''),
+                        'section': meta.get('section', ''),
+                        'section_title': meta.get('section_title', ''),
+                        'point': meta.get('point', ''),
+                        'is_table': True,
+                        'table_number': meta.get('table_number', ''),
+                        'type': 'Приложение А (полное)'
+                    })
+        except Exception:
+            pass
 
     # Дедупликация
     seen = set()
@@ -437,7 +470,16 @@ with st.sidebar:
         st.markdown(f"👍 **{ups}** · 👎 **{downs}**")
 
 
-st.markdown('<h1 class="main-header">🏗️ Поиск по СНиПам</h1>', unsafe_allow_html=True)
+# ✅ Заголовок с картинкой из assets
+header_cols = st.columns([1, 12])
+with header_cols[0]:
+    try:
+        st.image("assets/scale_1200.jpeg", width=70)
+    except Exception:
+        st.markdown("📐")
+with header_cols[1]:
+    st.markdown('<h1 class="main-header">Поиск по СНиПам</h1>', unsafe_allow_html=True)
+
 st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
 
 input_key = f"question_input_{st.session_state.input_version}"
@@ -510,7 +552,7 @@ with chat_container:
             with st.chat_message("user", avatar="👤"):
                 st.markdown(msg["content"])
         else:
-            with st.chat_message("assistant", avatar="🏗️"):
+            with st.chat_message("assistant", avatar="📐"):
                 st.markdown(msg["content"])
 
                 q = msg.get("question", "")
