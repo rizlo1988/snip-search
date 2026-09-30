@@ -198,11 +198,17 @@ def search_and_answer(question, selected_sources):
     if selected_sources:
         where_filter = {"source": {"$in": selected_sources}}
 
-    # Векторный поиск
+    # Определяем, спрашивают ли про определение термина
+    is_definition_question = bool(re.search(
+        r'что такое|определени|термин|называется',
+        question, re.IGNORECASE
+    ))
+
+    # Векторный поиск — увеличен до 40 для лучшего покрытия
     try:
         vector_results = collection.query(
             query_texts=[question],
-            n_results=30,
+            n_results=40,
             where=where_filter
         )
         if vector_results['documents'] and vector_results['documents'][0]:
@@ -221,23 +227,7 @@ def search_and_answer(question, selected_sources):
                     'type': 'векторный'
                 })
     except Exception:
-        if where_filter:
-            vector_results = collection.query(query_texts=[question], n_results=30)
-            if vector_results['documents'] and vector_results['documents'][0]:
-                for i, doc in enumerate(vector_results['documents'][0]):
-                    meta = vector_results['metadatas'][0][i]
-                    candidates.append({
-                        'text': doc,
-                        'source': meta.get('source', ''),
-                        'chapter': meta.get('chapter', ''),
-                        'chapter_title': meta.get('chapter_title', ''),
-                        'section': meta.get('section', ''),
-                        'section_title': meta.get('section_title', ''),
-                        'point': meta.get('point', ''),
-                        'is_table': meta.get('is_table', False),
-                        'table_number': meta.get('table_number', ''),
-                        'type': 'векторный (без фильтра)'
-                    })
+        pass
 
     # Поиск по таблицам
     table_matches = re.findall(
@@ -298,78 +288,104 @@ def search_and_answer(question, selected_sources):
         except Exception:
             pass
 
-    # Фильтрация
-    filtered = []
-    for c in candidates:
-        text_lower = c['text'].lower()
-        has_number = bool(re.search(r'\d+', c['text']))
-        has_keyword = any(
-            word in text_lower
-            for word in ['допуск', 'отклонен', 'мм', 'таблиц', 'не более',
-                         'толщин', 'слоя', 'устройств', 'требован']
-        )
-        if has_number and has_keyword:
-            filtered.append(c)
-
-    if not filtered:
-        filtered = candidates
-
     # Дедупликация
     seen = set()
-    unique_filtered = []
-    for c in filtered:
+    unique_candidates = []
+    for c in candidates:
         key = c['text'][:200]
         if key not in seen:
             seen.add(key)
-            unique_filtered.append(c)
+            unique_candidates.append(c)
 
-    unique_filtered = unique_filtered[:25]
+    # ✅ Фильтр: убираем термины из раздела 3, если не спрашивают определение
+    filtered = []
+    for c in unique_candidates:
+        # Пропускаем термины, если это не вопрос про определение
+        if not is_definition_question and c.get('chapter') == '3':
+            continue
+        # Пропускаем короткие терминологические чанки (<300 символов, начинаются с "3.")
+        if (not is_definition_question and 
+            len(c['text']) < 300 and 
+            re.match(r'^3\.\d+', c['text'])):
+            continue
+        filtered.append(c)
 
-    # Формируем контекст с полными ссылками
+    if not filtered:
+        filtered = unique_candidates  # fallback — если всё отфильтровалось
+
+    # ✅ Приоритет: чанки с "релевантной" главой (не термины) идут первыми
+    # Простой вес: длина чанка (крупные = более содержательные)
+    filtered.sort(key=lambda c: (
+        1 if c.get('chapter') != '3' else 0,   # сначала не-термины
+        len(c['text'])                          # потом по длине
+    ), reverse=True)
+
+    unique_filtered = filtered[:25]
+
+    # Формируем контекст
     context_parts = []
     sources_set = []
     for c in unique_filtered:
-        # Собираем полную ссылку: документ, раздел, пункт, таблица
+        # Полная ссылка
         ref_parts = [c['source'].replace('.txt', '')]
-        if c.get('section') and c.get('section_title'):
-            ref_parts.append(f"раздел {c['section']} «{c['section_title']}»")
-        elif c.get('section'):
-            ref_parts.append(f"раздел {c['section']}")
+
+        if c.get('chapter'):
+            ch_title = c.get('chapter_title', '')
+            if ch_title:
+                ref_parts.append(f"раздел {c['chapter']} «{ch_title}»")
+            else:
+                ref_parts.append(f"раздел {c['chapter']}")
+
+        if c.get('section'):
+            sec_title = c.get('section_title', '')
+            if sec_title:
+                ref_parts.append(f"подраздел {c['section']} «{sec_title}»")
+            else:
+                ref_parts.append(f"подраздел {c['section']}")
+
         if c.get('point'):
-            ref_parts.append(f"п. {c['point']}")
+            ref_parts.append(f"пункт {c['point']}")
+
         if c.get('table_number'):
             ref_parts.append(f"Таблица {c['table_number']}")
-        ref = ", ".join(ref_parts)
 
+        ref = " · ".join(ref_parts)
         context_parts.append(f"\n\n--- Источник: {ref} ---\n{c['text']}")
         if ref not in sources_set:
             sources_set.append(ref)
 
     context = "".join(context_parts)
 
-    # Промпт
-    prompt = f"""Не размышляй. Сразу давай ответ.
-Ты — эксперт по строительным нормам и правилам.
-Отвечай подробно. Приведи ВСЕ найденные требования, допуски и отклонения из фрагментов.
-Структурируй ответ: раздели на пункты, для каждого укажи значение и источник.
-Если в фрагментах нет ответа — честно скажи об этом.
-Для каждого требования обязательно указывай:
-- документ (СП/ГОСТ)
-- раздел и подраздел
-- номер пункта
-- номер таблицы (если есть)
+    # ✅ УЛУЧШЕННЫЙ ПРОМПТ с явным форматом
+    prompt = f"""Ты — эксперт по строительным нормам и правилам (СП, СНиП, ГОСТ).
+
+ВАЖНЫЕ ПРАВИЛА ОТВЕТА:
+1. Отвечай ТОЛЬКО на основе фрагментов ниже. Не выдумывай.
+2. Если во фрагментах нет ответа — честно скажи: «В найденных фрагментах нет полного ответа».
+3. Отвечай без размышлений, сразу структурированно.
+
+ФОРМАТ ОТВЕТА — для каждого требования/пункта указывай:
+- **Документ:** полное название (например, «СП 78.13330.2012 Автомобильные дороги»)
+- **Раздел:** номер и название (например, «8 Дорожные одежды»)
+- **Подраздел:** номер и название (если есть, например «8.4 Армирующие прослойки»)
+- **Пункт:** номер (например, 8.10)
+- **Таблица:** номер (если есть)
+- **Текст требования:** точная цитата или близкий пересказ
+
+Структурируй ответ по пунктам (1, 2, 3...). Каждый пункт — отдельное требование.
 
 ФРАГМЕНТЫ ДОКУМЕНТОВ:
 {context}
 
 ВОПРОС:
 {question}
-"""
+
+ОТВЕТ:"""
 
     response = client.chat.completions.create(
         model="Qwen/Qwen3-30B-A3B",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=2000,
+        max_tokens=2500,
         extra_body={"enable_thinking": False}
     )
 
@@ -413,13 +429,7 @@ with st.sidebar:
     st.markdown("### 📄 Документы")
 
     for src in sources_list:
-        if "ГОСТ" in src:
-            icon = "📘"
-        elif "СП" in src:
-            icon = "📗"
-        else:
-            icon = "📄"
-
+        icon = "📘" if "ГОСТ" in src else "📗"
         clean_name = src.replace(".txt", "")
         if len(clean_name) > 40:
             truncated = clean_name[:40]
@@ -541,13 +551,16 @@ for idx, msg in enumerate(st.session_state.messages):
             if fragments:
                 with st.expander(f"🔍 Фрагменты ({len(fragments)})", expanded=False):
                     for i, c in enumerate(fragments, 1):
-                        # Формируем читаемую ссылку
+                        # ✅ Полная ссылка без обрезки
                         ref_parts = [c.get('source', '').replace('.txt', '')]
                         if c.get('chapter'):
-                            ch_title = c.get('chapter_title', '')[:50]
-                            ref_parts.append(f"раздел {c['chapter']} «{ch_title}»")
+                            ch_title = c.get('chapter_title', '')
+                            if ch_title:
+                                ref_parts.append(f"раздел {c['chapter']} «{ch_title}»")
+                            else:
+                                ref_parts.append(f"раздел {c['chapter']}")
                         if c.get('section'):
-                            sec_title = c.get('section_title', '')[:50]
+                            sec_title = c.get('section_title', '')
                             if sec_title:
                                 ref_parts.append(f"подраздел {c['section']} «{sec_title}»")
                             else:

@@ -7,12 +7,54 @@ DOCS_FOLDER = "documents"
 DB_PATH = "./chroma_db"
 COLLECTION_NAME = "snip_docs"
 
-# ✅ БЫСТРАЯ модель (30 МБ) — не падает по памяти
+# ✅ БЫСТРАЯ модель (30 МБ)
 EMBEDDING_MODEL = "sergeyzh/rubert-tiny-turbo"
 
-# Максимальный размер чанка (гибрид)
 MAX_CHUNK_SIZE = 1500
 MIN_CHUNK_SIZE = 100
+
+
+# ==================== ЧИСТКА КОЛОНТИТУЛОВ ====================
+
+# Регулярки для удаления повторяющихся колонтитулов из PDF-исходников
+HEADER_PATTERNS = [
+    re.compile(r'СП\s+\d+\.\d+\.\d+.*Актуализированная редакция'),
+    re.compile(r'Свод правил от \d+\.\d+\.\d+ N \d+'),
+    re.compile(r'^Страница \d+$'),
+    re.compile(r'Внимание! Документ включен'),
+    re.compile(r'ИС «Кодекс: \d поколение»'),
+    re.compile(r'Внимание! О порядке применения документа'),
+    re.compile(r'Внимание! Дополнительную информацию см\.'),
+    re.compile(r'Документ предоставлен КонсультантПлюс'),
+    re.compile(r'^\s*КонсультантПлюс:'),
+    re.compile(r'^СП \d+\.\d+\.\d+\.\d+$'),
+    re.compile(r'^ГОСТ Р \d+-\d+$'),
+    re.compile(r'^ГОСТ \d+-\d+$'),
+    re.compile(r'^Применяется с \d+\.\d+\.\d+'),
+    re.compile(r'^Страница \d+$'),
+]
+
+# Маркеры, после которых идёт мусорная строка (например, после заголовка идёт колонтитул)
+def is_header_line(line):
+    """Проверяет, является ли строка колонтитулом."""
+    stripped = line.strip()
+    if not stripped:
+        return False
+    for pattern in HEADER_PATTERNS:
+        if pattern.search(stripped):
+            return True
+    return False
+
+
+def clean_text(text):
+    """Удаляет колонтитулы и мусорные строки из текста документа."""
+    lines = text.split('\n')
+    cleaned = []
+    for line in lines:
+        if is_header_line(line):
+            continue
+        cleaned.append(line)
+    return '\n'.join(cleaned)
 
 
 # ==================== ПАРСИНГ СТРУКТУРЫ ДОКУМЕНТА ====================
@@ -20,11 +62,9 @@ MIN_CHUNK_SIZE = 100
 def parse_document(text, filename):
     """
     Универсальный парсер СП и ГОСТ с сохранением структуры.
-    Возвращает список чанков с метаданными.
     """
     chunks = []
 
-    # Извлекаем тип и номер документа из имени файла
     doc_type = "ГОСТ" if "ГОСТ" in filename.upper() else "СП"
     doc_number_match = re.search(r'(\d+(?:\.\d+)*)', filename)
     doc_number = doc_number_match.group(1) if doc_number_match else ""
@@ -33,8 +73,8 @@ def parse_document(text, filename):
     total_lines = len(lines)
 
     # Регулярные выражения
-    chapter_re = re.compile(r'^(\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{3,80})$')
-    section_re = re.compile(r'^(\d{1,2}\.\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{3,80})$')
+    chapter_re = re.compile(r'^(\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{3,100})$')
+    section_re = re.compile(r'^(\d{1,2}\.\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{3,100})$')
     point_re = re.compile(r'^(\d{1,2}(?:\.\d{1,2}){1,3})\s+')
     table_re = re.compile(r'^Таблица\s+([А-ЯA-Z]?\.?\d+(?:\.\d+)?[а-яa-z]?)')
     appendix_re = re.compile(r'^Приложение\s+([А-ЯA-Z])')
@@ -46,6 +86,9 @@ def parse_document(text, filename):
     current_point = ""
     current_buffer = []
     current_start_line = 0
+    # Флаг: находимся ли мы "внутри таблицы" (пропускать распознавание структур)
+    inside_table = False
+    table_lines_count = 0
 
     def flush_buffer(end_line, is_table=False, table_num=""):
         nonlocal current_buffer, current_start_line
@@ -99,18 +142,21 @@ def parse_document(text, filename):
             while j < total_lines:
                 next_line = lines[j]
                 next_stripped = next_line.strip()
+                # Новая таблица?
+                if table_re.match(next_stripped):
+                    break
+                # Конец таблицы — 2 пустые строки
                 if not next_stripped:
                     empty_count += 1
-                    if empty_count >= 2:
+                    if empty_count >= 3:
                         break
                     table_lines.append(next_line)
-                elif chapter_re.match(next_stripped) or \
-                     section_re.match(next_stripped) or \
-                     table_re.match(next_stripped):
-                    break
                 else:
                     empty_count = 0
                     table_lines.append(next_line)
+                    # Если таблица слишком длинная — прекращаем
+                    if len(table_lines) > 200:
+                        break
                 j += 1
 
             table_text = '\n'.join(table_lines).strip()
@@ -119,9 +165,17 @@ def parse_document(text, filename):
             current_start_line = i
             continue
 
-        # 2. Новый раздел?
+        # 2. Новый раздел? (только если НЕ внутри таблицы)
+        # Дополнительная защита: если предыдущая строка не пустая и содержит цифры — не считаем разделом
+        prev_stripped = lines[i-1].strip() if i > 0 else ""
+        looks_like_table_row = (
+            len(stripped) > 0 and
+            stripped[0].isdigit() and
+            not re.match(r'^\d{1,2}\s+[А-ЯЁ]', stripped)
+        )
+
         chapter_match = chapter_re.match(stripped)
-        if chapter_match:
+        if chapter_match and not looks_like_table_row:
             flush_buffer(i)
             current_chapter = chapter_match.group(1)
             current_chapter_title = chapter_match.group(2).strip()
@@ -133,7 +187,7 @@ def parse_document(text, filename):
 
         # 3. Новый подраздел?
         section_match = section_re.match(stripped)
-        if section_match:
+        if section_match and not looks_like_table_row:
             flush_buffer(i)
             current_section = section_match.group(1)
             current_section_title = section_match.group(2).strip()
@@ -143,7 +197,7 @@ def parse_document(text, filename):
 
         # 4. Новый пункт?
         point_match = point_re.match(stripped)
-        if point_match and not is_excluded:
+        if point_match and not is_excluded and not looks_like_table_row:
             flush_buffer(i)
             current_point = point_match.group(1)
             current_buffer.append(line)
@@ -243,6 +297,9 @@ def build_database(progress_callback=None):
         filepath = os.path.join(DOCS_FOLDER, filename)
         with open(filepath, "r", encoding="utf-8") as f:
             content = f.read()
+
+        # ✅ ЧИСТКА КОЛОНТИТУЛОВ перед парсингом
+        content = clean_text(content)
 
         chunks = parse_document(content, filename)
 
