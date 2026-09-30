@@ -51,10 +51,6 @@ def clean_text(text):
 # ==================== КОНТЕКСТ ТАБЛИЦЫ ====================
 
 def looks_like_table_context(lines, i, window=6):
-    """
-    Проверяет, что мы внутри таблицы (по окну строк вокруг i).
-    Признаки: много цифр, единицы измерения, колонки.
-    """
     start = max(0, i - window)
     end = min(len(lines), i + window)
     context = ' '.join(lines[start:end])
@@ -73,7 +69,6 @@ def looks_like_table_context(lines, i, window=6):
         return False
 
     number_ratio = number_lines / total_nonempty
-
     has_units = bool(re.search(r'\b(мм|см|кг|м|м/с|м/сут|‰|%|МПа|см²|м²|м³)\b', context))
     has_columns = bool(re.search(r'\s{3,}', context))
 
@@ -108,7 +103,7 @@ def parse_document(text, filename):
     current_point = ""
     current_buffer = []
     current_start_line = 0
-    in_appendix = False  # ✅ НОВОЕ: флаг нахождения внутри приложения
+    in_appendix = False  # ✅ ФЛАГ: внутри приложения
 
     def flush_buffer(end_line, is_table=False, table_num=""):
         nonlocal current_buffer, current_start_line
@@ -150,10 +145,9 @@ def parse_document(text, filename):
         stripped = line.strip()
 
         is_excluded = bool(re.search(r'\(Исключен[а]?,?\s', stripped))
-
         in_table_context = looks_like_table_context(lines, i)
 
-        # 1. Новая таблица?
+        # 1. Новая таблица
         table_match = table_re.match(stripped)
         if table_match:
             flush_buffer(i)
@@ -165,21 +159,14 @@ def parse_document(text, filename):
                 next_line = lines[j]
                 next_stripped = next_line.strip()
 
-                # Новая таблица?
                 if table_re.match(next_stripped):
                     break
-
-                # НАЧАЛО НОВОГО ПУНКТА — таблица закончилась
-                # ✅ НОВОЕ: внутри приложения не прерываем таблицу на пунктах
+                # ✅ Не прерываем таблицу внутри приложения
                 if re.match(r'^\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\s+[А-ЯЁ]', next_stripped) and not in_appendix:
                     break
-
-                # НАЧАЛО НОВОГО РАЗДЕЛА — таблица закончилась
-                # ✅ НОВОЕ: внутри приложения не прерываем таблицу на разделах
                 if chapter_full_re.match(next_stripped) and not in_appendix:
                     break
 
-                # Конец таблицы — 3 пустые строки
                 if not next_stripped:
                     empty_count += 1
                     if empty_count >= 3:
@@ -198,7 +185,7 @@ def parse_document(text, filename):
             current_start_line = i
             continue
 
-        # 2. Раздел — двухстрочный формат: "8" + "Дорожные одежды"
+        # 2. Двухстрочный раздел
         chapter_num_match = chapter_number_only_re.match(stripped)
         if chapter_num_match and not in_table_context and not in_appendix:
             j = i + 1
@@ -216,8 +203,7 @@ def parse_document(text, filename):
                     i = j + 1
                     continue
 
-        # 3. Раздел — однострочный формат: "8 Дорожные одежды"
-        # ✅ НОВОЕ: внутри приложения не режем на разделы
+        # 3. Однострочный раздел
         chapter_match = chapter_full_re.match(stripped)
         if chapter_match and not in_table_context and not in_appendix:
             flush_buffer(i)
@@ -230,7 +216,6 @@ def parse_document(text, filename):
             continue
 
         # 4. Подраздел
-        # ✅ НОВОЕ: внутри приложения не режем на подразделы
         section_match = section_re.match(stripped)
         if section_match and not in_table_context and not in_appendix:
             flush_buffer(i)
@@ -241,7 +226,6 @@ def parse_document(text, filename):
             continue
 
         # 5. Пункт
-        # ✅ НОВОЕ: внутри приложения не режем на пункты
         point_match = point_re.match(stripped)
         if point_match and not is_excluded and not in_table_context and not in_appendix:
             flush_buffer(i)
@@ -259,16 +243,15 @@ def parse_document(text, filename):
             current_section = ""
             current_section_title = ""
             current_point = ""
-            in_appendix = True  # ✅ НОВОЕ: входим в приложение
+            in_appendix = True  # ✅ ВОШЛИ в приложение
             i += 1
             continue
 
-        # ✅ НОВОЕ: выход из приложения при новом разделе документа
-        # (например, "1 Общие положения" после приложения)
+        # ✅ ВЫХОД из приложения при новом разделе документа
         if in_appendix and chapter_full_re.match(stripped) and not in_table_context:
             in_appendix = False
 
-        # 7. Продолжение текущего пункта
+        # 7. Продолжение
         if current_buffer or current_point:
             current_buffer.append(line)
         elif stripped:
