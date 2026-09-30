@@ -221,7 +221,7 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-    # 3) Универсальный поиск по маркерам таблиц/приложений/допусков
+    # 3) Универсальный поиск по маркерам
     if re.search(
         r'допуск|отклонени|отметк|ширин|уклон|ровност|толщин|'
         r'предельн|значени|параметр|размер|погрешн|расстоян|'
@@ -271,7 +271,38 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-        # ✅ СПЕЦИАЛЬНЫЙ ПОИСК: Таблица А.1 СП 78 (допуски на дорожные работы)
+        # ✅ ПОИСК ПО МЕТАДАННЫМ: Таблица А.1
+        try:
+            meta_query = collection.get(
+                where={"$and": [
+                    {"chapter": "Приложение А"},
+                    {"is_table": True}
+                ]},
+                limit=10
+            )
+            if meta_query['documents']:
+                for i, doc in enumerate(meta_query['documents']):
+                    meta = meta_query['metadatas'][i]
+                    if selected_sources and meta.get('source') not in selected_sources:
+                        continue
+                    if 'Таблица А.1' not in doc and 'А.1' not in meta.get('table_number', ''):
+                        continue
+                    candidates.append({
+                        'text': doc,
+                        'source': meta.get('source', ''),
+                        'chapter': meta.get('chapter', ''),
+                        'chapter_title': meta.get('chapter_title', ''),
+                        'section': meta.get('section', ''),
+                        'section_title': meta.get('section_title', ''),
+                        'point': meta.get('point', ''),
+                        'is_table': True,
+                        'table_number': 'А.1',
+                        'type': 'Таблица А.1 (метаданные)'
+                    })
+        except Exception:
+            pass
+
+        # ✅ ДОПОЛНИТЕЛЬНО: поиск по "$contains" Таблица А.1
         try:
             app_a_query = collection.get(
                 where_document={"$contains": "Таблица А.1"},
@@ -297,31 +328,6 @@ def search_and_answer(question, selected_sources):
         except Exception:
             pass
 
-        # ✅ ДОПОЛНИТЕЛЬНО: Таблица А.1 только из СП 78
-        try:
-            app_a_sp78 = collection.get(
-                where_document={"$contains": "Таблица А.1"},
-                where={"source": "СП 78.13330.2012 Автомобильные дороги.txt"},
-                limit=5
-            )
-            if app_a_sp78['documents']:
-                for i, doc in enumerate(app_a_sp78['documents']):
-                    meta = app_a_sp78['metadatas'][i]
-                    candidates.append({
-                        'text': doc,
-                        'source': meta.get('source', ''),
-                        'chapter': meta.get('chapter', ''),
-                        'chapter_title': meta.get('chapter_title', ''),
-                        'section': meta.get('section', ''),
-                        'section_title': meta.get('section_title', ''),
-                        'point': meta.get('point', ''),
-                        'is_table': True,
-                        'table_number': 'А.1',
-                        'type': 'Таблица А.1 СП 78 (допуски)'
-                    })
-        except Exception:
-            pass
-
     # Дедупликация
     seen = set()
     unique_candidates = []
@@ -336,9 +342,15 @@ def search_and_answer(question, selected_sources):
     if not filtered:
         filtered = unique_candidates
 
+    # ✅ СОРТИРОВКА С ПРИОРИТЕТОМ ДЛЯ ТАБЛИЦЫ А.1
     filtered.sort(key=lambda c: (
+        # Приоритет 1: Таблица А.1 — ВСЕГДА выше всех
+        0 if 'Таблица А.1' in c.get('type', '') else 1,
+        # Приоритет 2: таблицы
         0 if c.get('is_table') else 1,
+        # Приоритет 3: не мусор
         1 if c.get('chapter') not in ('', '3', '1', '2') else 0,
+        # Приоритет 4: длинные
         len(c['text'])
     ), reverse=True)
 
@@ -520,7 +532,6 @@ if ask_clicked and user_input_text.strip():
 
 chat_container = st.container()
 
-# ✅ ЗАЩИТА ОТ ДУБЛЯ
 if user_input:
     last_user_msg = None
     for m in reversed(st.session_state.messages):
