@@ -7,7 +7,6 @@ DOCS_FOLDER = "documents"
 DB_PATH = "./chroma_db"
 COLLECTION_NAME = "snip_docs"
 
-# ✅ БЫСТРАЯ модель (30 МБ)
 EMBEDDING_MODEL = "sergeyzh/rubert-tiny-turbo"
 
 MAX_CHUNK_SIZE = 1500
@@ -16,7 +15,6 @@ MIN_CHUNK_SIZE = 100
 
 # ==================== ЧИСТКА КОЛОНТИТУЛОВ ====================
 
-# Регулярки для удаления повторяющихся колонтитулов из PDF-исходников
 HEADER_PATTERNS = [
     re.compile(r'СП\s+\d+\.\d+\.\d+.*Актуализированная редакция'),
     re.compile(r'Свод правил от \d+\.\d+\.\d+ N \d+'),
@@ -31,12 +29,10 @@ HEADER_PATTERNS = [
     re.compile(r'^ГОСТ Р \d+-\d+$'),
     re.compile(r'^ГОСТ \d+-\d+$'),
     re.compile(r'^Применяется с \d+\.\d+\.\d+'),
-    re.compile(r'^Страница \d+$'),
 ]
 
-# Маркеры, после которых идёт мусорная строка (например, после заголовка идёт колонтитул)
+
 def is_header_line(line):
-    """Проверяет, является ли строка колонтитулом."""
     stripped = line.strip()
     if not stripped:
         return False
@@ -47,22 +43,51 @@ def is_header_line(line):
 
 
 def clean_text(text):
-    """Удаляет колонтитулы и мусорные строки из текста документа."""
     lines = text.split('\n')
-    cleaned = []
-    for line in lines:
-        if is_header_line(line):
-            continue
-        cleaned.append(line)
+    cleaned = [line for line in lines if not is_header_line(line)]
     return '\n'.join(cleaned)
 
 
-# ==================== ПАРСИНГ СТРУКТУРЫ ДОКУМЕНТА ====================
+# ==================== КОНТЕКСТ ТАБЛИЦЫ ====================
+
+def looks_like_table_context(lines, i, window=6):
+    """
+    Проверяет, что мы внутри таблицы (по окну строк вокруг i).
+    Признаки: много цифр, единицы измерения, колонки.
+    """
+    start = max(0, i - window)
+    end = min(len(lines), i + window)
+    context = ' '.join(lines[start:end])
+
+    # Считаем долю строк с цифрами
+    number_lines = 0
+    total_nonempty = 0
+    for j in range(start, end):
+        stripped = lines[j].strip()
+        if not stripped:
+            continue
+        total_nonempty += 1
+        if re.search(r'\d', stripped):
+            number_lines += 1
+
+    if total_nonempty == 0:
+        return False
+
+    number_ratio = number_lines / total_nonempty
+
+    # Признаки таблицы:
+    # 1) Больше 50% строк с цифрами
+    # 2) Есть единицы измерения (мм, м, кг, см, %, ‰)
+    # 3) Есть колонки (2+ пробела подряд)
+    has_units = bool(re.search(r'\b(мм|см|кг|м|м/с|м/сут|‰|%|МПа|см²|м²|м³)\b', context))
+    has_columns = bool(re.search(r'\s{3,}', context))
+
+    return number_ratio > 0.5 or (has_units and has_columns)
+
+
+# ==================== ПАРСИНГ ====================
 
 def parse_document(text, filename):
-    """
-    Универсальный парсер СП и ГОСТ с сохранением структуры.
-    """
     chunks = []
 
     doc_type = "ГОСТ" if "ГОСТ" in filename.upper() else "СП"
@@ -72,12 +97,16 @@ def parse_document(text, filename):
     lines = text.split('\n')
     total_lines = len(lines)
 
-    # Регулярные выражения
-    chapter_re = re.compile(r'^(\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{3,100})$')
+    # Основные regex
+    chapter_full_re = re.compile(r'^(\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{3,100})$')
+    chapter_number_only_re = re.compile(r'^(\d{1,2})$')
     section_re = re.compile(r'^(\d{1,2}\.\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{3,100})$')
     point_re = re.compile(r'^(\d{1,2}(?:\.\d{1,2}){1,3})\s+')
     table_re = re.compile(r'^Таблица\s+([А-ЯA-Z]?\.?\d+(?:\.\d+)?[а-яa-z]?)')
     appendix_re = re.compile(r'^Приложение\s+([А-ЯA-Z])')
+
+    # Заголовок следующей строки (для случая «8» + «Дорожные одежды»)
+    title_re = re.compile(r'^[А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{3,100}$')
 
     current_chapter = ""
     current_chapter_title = ""
@@ -86,9 +115,6 @@ def parse_document(text, filename):
     current_point = ""
     current_buffer = []
     current_start_line = 0
-    # Флаг: находимся ли мы "внутри таблицы" (пропускать распознавание структур)
-    inside_table = False
-    table_lines_count = 0
 
     def flush_buffer(end_line, is_table=False, table_num=""):
         nonlocal current_buffer, current_start_line
@@ -131,6 +157,9 @@ def parse_document(text, filename):
 
         is_excluded = bool(re.search(r'\(Исключен[а]?,?\s', stripped))
 
+        # Определяем, что мы в контексте таблицы (для защиты от ложных разделов)
+        in_table_context = looks_like_table_context(lines, i)
+
         # 1. Новая таблица?
         table_match = table_re.match(stripped)
         if table_match:
@@ -142,10 +171,20 @@ def parse_document(text, filename):
             while j < total_lines:
                 next_line = lines[j]
                 next_stripped = next_line.strip()
+
                 # Новая таблица?
                 if table_re.match(next_stripped):
                     break
-                # Конец таблицы — 2 пустые строки
+
+                # НАЧАЛО НОВОГО ПУНКТА (N.N или N.N.N) — таблица закончилась
+                if re.match(r'^\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\s+[А-ЯЁ]', next_stripped):
+                    break
+
+                # НАЧАЛО НОВОГО РАЗДЕЛА — таблица закончилась
+                if chapter_full_re.match(next_stripped):
+                    break
+
+                # Конец таблицы — 3 пустые строки
                 if not next_stripped:
                     empty_count += 1
                     if empty_count >= 3:
@@ -154,7 +193,6 @@ def parse_document(text, filename):
                 else:
                     empty_count = 0
                     table_lines.append(next_line)
-                    # Если таблица слишком длинная — прекращаем
                     if len(table_lines) > 200:
                         break
                 j += 1
@@ -165,17 +203,29 @@ def parse_document(text, filename):
             current_start_line = i
             continue
 
-        # 2. Новый раздел? (только если НЕ внутри таблицы)
-        # Дополнительная защита: если предыдущая строка не пустая и содержит цифры — не считаем разделом
-        prev_stripped = lines[i-1].strip() if i > 0 else ""
-        looks_like_table_row = (
-            len(stripped) > 0 and
-            stripped[0].isdigit() and
-            not re.match(r'^\d{1,2}\s+[А-ЯЁ]', stripped)
-        )
+        # 2. Раздел — двухстрочный формат: "8" + "Дорожные одежды"
+        chapter_num_match = chapter_number_only_re.match(stripped)
+        if chapter_num_match and not in_table_context:
+            # Проверяем следующую непустую строку
+            j = i + 1
+            while j < total_lines and not lines[j].strip():
+                j += 1
+            if j < total_lines:
+                next_stripped = lines[j].strip()
+                if title_re.match(next_stripped) and len(next_stripped) > 5:
+                    # Это двухстрочный раздел
+                    flush_buffer(i)
+                    current_chapter = chapter_num_match.group(1)
+                    current_chapter_title = next_stripped
+                    current_section = ""
+                    current_section_title = ""
+                    current_point = ""
+                    i = j + 1
+                    continue
 
-        chapter_match = chapter_re.match(stripped)
-        if chapter_match and not looks_like_table_row:
+        # 3. Раздел — однострочный формат: "8 Дорожные одежды"
+        chapter_match = chapter_full_re.match(stripped)
+        if chapter_match and not in_table_context:
             flush_buffer(i)
             current_chapter = chapter_match.group(1)
             current_chapter_title = chapter_match.group(2).strip()
@@ -185,9 +235,9 @@ def parse_document(text, filename):
             i += 1
             continue
 
-        # 3. Новый подраздел?
+        # 4. Подраздел
         section_match = section_re.match(stripped)
-        if section_match and not looks_like_table_row:
+        if section_match and not in_table_context:
             flush_buffer(i)
             current_section = section_match.group(1)
             current_section_title = section_match.group(2).strip()
@@ -195,18 +245,18 @@ def parse_document(text, filename):
             i += 1
             continue
 
-        # 4. Новый пункт?
+        # 5. Пункт
         point_match = point_re.match(stripped)
-        if point_match and not is_excluded and not looks_like_table_row:
+        if point_match and not is_excluded and not in_table_context:
             flush_buffer(i)
             current_point = point_match.group(1)
             current_buffer.append(line)
             i += 1
             continue
 
-        # 5. Приложение?
+        # 6. Приложение
         appendix_match = appendix_re.match(stripped)
-        if appendix_match:
+        if appendix_match and not in_table_context:
             flush_buffer(i)
             current_chapter = f"Приложение {appendix_match.group(1)}"
             current_chapter_title = stripped
@@ -216,7 +266,7 @@ def parse_document(text, filename):
             i += 1
             continue
 
-        # 6. Продолжение пункта
+        # 7. Продолжение текущего пункта
         if current_buffer or current_point:
             current_buffer.append(line)
         elif stripped:
@@ -231,7 +281,6 @@ def parse_document(text, filename):
 
 
 def split_large_chunk(text, max_size):
-    """Режет большой чанк на части по абзацам."""
     parts = []
     paragraphs = text.split('\n\n')
     current = ""
@@ -260,7 +309,7 @@ def split_large_chunk(text, max_size):
     return parts
 
 
-# ==================== ПОСТРОЕНИЕ БАЗЫ ====================
+# ==================== СБОРКА ====================
 
 def build_database(progress_callback=None):
     client = chromadb.PersistentClient(path=DB_PATH)
@@ -298,9 +347,7 @@ def build_database(progress_callback=None):
         with open(filepath, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # ✅ ЧИСТКА КОЛОНТИТУЛОВ перед парсингом
         content = clean_text(content)
-
         chunks = parse_document(content, filename)
 
         if progress_callback:

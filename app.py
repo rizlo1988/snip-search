@@ -6,14 +6,12 @@ import os
 from datetime import datetime
 from db_builder import build_database, DB_PATH, COLLECTION_NAME
 
-# PDF
 try:
     import ironpress
     IRONPRESS_OK = True
 except ImportError:
     IRONPRESS_OK = False
 
-# ==================== НАСТРОЙКИ СТРАНИЦЫ ====================
 st.set_page_config(
     page_title="Поиск по СНиПам",
     page_icon="🏗️",
@@ -21,111 +19,39 @@ st.set_page_config(
     initial_sidebar_state="auto"
 )
 
-# ==================== КАСТОМНЫЙ CSS ====================
 st.markdown("""
 <style>
     .stApp { background: var(--background-color); }
-    .main-header {
-        color: var(--primary-color);
-        font-size: 1.7rem;
-        font-weight: 700;
-        margin-bottom: 0.5rem;
-        line-height: 1.2;
-    }
-    .main-subheader {
-        color: var(--text-color);
-        opacity: 0.7;
-        font-size: 1rem;
-        margin-bottom: 1.5rem;
-    }
-    .sidebar-header {
-        color: var(--primary-color);
-        font-size: 1.3rem;
-        font-weight: 700;
-        margin-bottom: 0.5rem;
-    }
-    .stButton > button, .stFormSubmitButton > button {
-        border-radius: 8px;
-        font-weight: 600;
-        transition: all 0.3s;
-    }
-    .stButton > button:hover, .stFormSubmitButton > button:hover {
-        transform: translateY(-2px);
-    }
-    .stTextInput > div > div > input {
-        border-radius: 8px;
-        padding: 0.75rem;
-        font-size: 1rem;
-    }
-    [data-testid="stSidebar"] {
-        min-width: 260px !important;
-        max-width: 300px !important;
-    }
+    .main-header { color: var(--primary-color); font-size: 1.7rem; font-weight: 700; margin-bottom: 0.5rem; line-height: 1.2; }
+    .main-subheader { color: var(--text-color); opacity: 0.7; font-size: 1rem; margin-bottom: 1.5rem; }
+    .sidebar-header { color: var(--primary-color); font-size: 1.3rem; font-weight: 700; margin-bottom: 0.5rem; }
+    .stButton > button, .stFormSubmitButton > button { border-radius: 8px; font-weight: 600; transition: all 0.3s; }
+    .stButton > button:hover, .stFormSubmitButton > button:hover { transform: translateY(-2px); }
+    .stTextInput > div > div > input { border-radius: 8px; padding: 0.75rem; font-size: 1rem; }
+    [data-testid="stSidebar"] { min-width: 260px !important; max-width: 300px !important; }
     .doc-card {
         background: var(--secondary-background-color);
         border-left: 4px solid var(--primary-color);
-        padding: 0.5rem 0.75rem;
-        margin-bottom: 0.4rem;
-        border-radius: 6px;
-        font-size: 0.8rem;
-        line-height: 1.3;
+        padding: 0.5rem 0.75rem; margin-bottom: 0.4rem; border-radius: 6px;
+        font-size: 0.8rem; line-height: 1.3;
     }
     .fragments-info {
-        background: var(--secondary-background-color);
-        border-radius: 8px;
-        padding: 0.75rem 1rem;
-        margin: 1rem 0;
-        color: var(--primary-color);
-        font-weight: 600;
+        background: var(--secondary-background-color); border-radius: 8px;
+        padding: 0.75rem 1rem; margin: 1rem 0;
+        color: var(--primary-color); font-weight: 600;
     }
-    .source-ref {
-        font-size: 0.85rem;
-        color: var(--primary-color);
-        margin-bottom: 0.4rem;
-        font-weight: 600;
-    }
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-    }
+    .source-ref { font-size: 0.85rem; color: var(--primary-color); margin-bottom: 0.4rem; font-weight: 600; }
+    .block-container { padding-top: 2rem; padding-bottom: 2rem; }
     @media (max-width: 768px) {
         .main-header { font-size: 1.3rem !important; line-height: 1.2; margin-bottom: 0.3rem; }
         .main-subheader { font-size: 0.85rem; margin-bottom: 1rem; line-height: 1.3; }
-        .block-container {
-            padding-top: 1rem !important;
-            padding-bottom: 3rem !important;
-            padding-left: 0.75rem !important;
-            padding-right: 0.75rem !important;
-        }
-        [data-testid="stSidebar"] {
-            min-width: 0 !important;
-            max-width: 100% !important;
-        }
-        [data-testid="stSidebar"] .doc-card {
-            font-size: 0.75rem;
-            padding: 0.4rem 0.6rem;
-        }
-        .stButton > button,
-        .stFormSubmitButton > button {
-            font-size: 0.9rem !important;
-            padding: 0.6rem 0.8rem !important;
-            min-height: 2.6rem;
-        }
-        .stFormSubmitButton > button {
-            font-size: 1rem !important;
-            padding: 0.75rem 1.5rem !important;
-            min-height: 3rem !important;
-        }
-        .stTextInput > div > div > input {
-            font-size: 1rem !important;
-            padding: 0.75rem !important;
-            min-height: 2.75rem;
-        }
-        .fragments-info {
-            font-size: 0.85rem;
-            padding: 0.6rem 0.8rem;
-            margin: 0.75rem 0;
-        }
+        .block-container { padding-top: 1rem !important; padding-bottom: 3rem !important; padding-left: 0.75rem !important; padding-right: 0.75rem !important; }
+        [data-testid="stSidebar"] { min-width: 0 !important; max-width: 100% !important; }
+        [data-testid="stSidebar"] .doc-card { font-size: 0.75rem; padding: 0.4rem 0.6rem; }
+        .stButton > button, .stFormSubmitButton > button { font-size: 0.9rem !important; padding: 0.6rem 0.8rem !important; min-height: 2.6rem; }
+        .stFormSubmitButton > button { font-size: 1rem !important; padding: 0.75rem 1.5rem !important; min-height: 3rem !important; }
+        .stTextInput > div > div > input { font-size: 1rem !important; padding: 0.75rem !important; min-height: 2.75rem; }
+        .fragments-info { font-size: 0.85rem; padding: 0.6rem 0.8rem; margin: 0.75rem 0; }
         .stExpander { margin-bottom: 0.5rem !important; }
         .stExpander summary { font-size: 0.9rem !important; }
     }
@@ -133,7 +59,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ==================== ИНИЦИАЛИЗАЦИЯ ====================
 @st.cache_resource
 def load_client():
     api_key = st.secrets["CLOUD_API_KEY"]
@@ -151,7 +76,6 @@ client = load_client()
 @st.cache_resource(show_spinner=False)
 def load_collection():
     need_build = not os.path.exists(DB_PATH)
-
     if not need_build:
         try:
             chroma_client = chromadb.PersistentClient(path=DB_PATH)
@@ -162,10 +86,8 @@ def load_collection():
     if need_build:
         with st.spinner("🔨 Первый запуск: собираю векторную базу. Это займёт 2-5 минут..."):
             progress_placeholder = st.empty()
-
             def show_progress(msg):
                 progress_placeholder.info(msg)
-
             build_database(progress_callback=show_progress)
             progress_placeholder.success("✅ База собрана!")
 
@@ -189,22 +111,53 @@ def count_sources():
 sources_list = count_sources()
 
 
-# ==================== ФУНКЦИЯ ПОИСКА ====================
+# ✅ Фильтр «мусорных» разделов
+TRASH_CHAPTERS = {'1', '2'}  # Область применения, Нормативные ссылки
+TRASH_TITLE_PATTERNS = [
+    re.compile(r'Нормативные ссылки', re.IGNORECASE),
+    re.compile(r'Область применения', re.IGNORECASE),
+]
+
+
+def is_trash_fragment(c, is_definition_question=False):
+    """Проверяет, является ли фрагмент мусором для выдачи."""
+    ch = c.get('chapter', '')
+    ch_title = c.get('chapter_title', '')
+
+    # Раздел 3 — Термины (кроме случаев, когда спрашивают про определение)
+    if not is_definition_question and ch == '3':
+        return True
+
+    # Раздел 1, 2 — Область применения, Нормативные ссылки
+    if ch in TRASH_CHAPTERS:
+        return True
+
+    # Проверяем title
+    for p in TRASH_TITLE_PATTERNS:
+        if p.search(ch_title):
+            return True
+
+    # ✅ Ложные «разделы» — числовые > 30 (это строки таблиц)
+    # Реальные разделы СП максимум ~20, у ГОСТ ~10
+    if ch.isdigit() and int(ch) > 30:
+        return True
+
+    return False
+
+
 def search_and_answer(question, selected_sources):
-    """Гибридный поиск: вектор + таблицы + ключевые слова."""
     candidates = []
 
     where_filter = None
     if selected_sources:
         where_filter = {"source": {"$in": selected_sources}}
 
-    # Определяем, спрашивают ли про определение термина
     is_definition_question = bool(re.search(
         r'что такое|определени|термин|называется',
         question, re.IGNORECASE
     ))
 
-    # Векторный поиск — увеличен до 40 для лучшего покрытия
+    # Векторный поиск
     try:
         vector_results = collection.query(
             query_texts=[question],
@@ -229,11 +182,10 @@ def search_and_answer(question, selected_sources):
     except Exception:
         pass
 
-    # Поиск по таблицам
+    # Таблицы
     table_matches = re.findall(
         r'таблиц[аы]?\s*([А-ЯA-Z]?\.?\d+(?:\.\d+)?)',
-        question,
-        re.IGNORECASE
+        question, re.IGNORECASE
     )
     if table_matches:
         for table_num in table_matches:
@@ -262,7 +214,7 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-    # Поиск по ключевым словам
+    # Ключевые слова
     if re.search(r'допуск|отклонени', question, re.IGNORECASE):
         try:
             keyword_results = collection.query(
@@ -297,55 +249,40 @@ def search_and_answer(question, selected_sources):
             seen.add(key)
             unique_candidates.append(c)
 
-    # ✅ Фильтр: убираем термины из раздела 3, если не спрашивают определение
-    filtered = []
-    for c in unique_candidates:
-        # Пропускаем термины, если это не вопрос про определение
-        if not is_definition_question and c.get('chapter') == '3':
-            continue
-        # Пропускаем короткие терминологические чанки (<300 символов, начинаются с "3.")
-        if (not is_definition_question and 
-            len(c['text']) < 300 and 
-            re.match(r'^3\.\d+', c['text'])):
-            continue
-        filtered.append(c)
+    # ✅ Фильтр мусора
+    filtered = [c for c in unique_candidates if not is_trash_fragment(c, is_definition_question)]
 
     if not filtered:
-        filtered = unique_candidates  # fallback — если всё отфильтровалось
+        filtered = unique_candidates
 
-    # ✅ Приоритет: чанки с "релевантной" главой (не термины) идут первыми
-    # Простой вес: длина чанка (крупные = более содержательные)
+    # Приоритетная сортировка
     filtered.sort(key=lambda c: (
-        1 if c.get('chapter') != '3' else 0,   # сначала не-термины
-        len(c['text'])                          # потом по длине
+        0 if c.get('is_table') else 1,  # таблицы — но не главное, потом
+        1 if c.get('chapter') not in ('', '3', '1', '2') else 0,
+        len(c['text'])
     ), reverse=True)
 
     unique_filtered = filtered[:25]
 
-    # Формируем контекст
+    # Контекст
     context_parts = []
     sources_set = []
     for c in unique_filtered:
-        # Полная ссылка
         ref_parts = [c['source'].replace('.txt', '')]
-
         if c.get('chapter'):
             ch_title = c.get('chapter_title', '')
             if ch_title:
                 ref_parts.append(f"раздел {c['chapter']} «{ch_title}»")
             else:
                 ref_parts.append(f"раздел {c['chapter']}")
-
         if c.get('section'):
             sec_title = c.get('section_title', '')
             if sec_title:
                 ref_parts.append(f"подраздел {c['section']} «{sec_title}»")
             else:
                 ref_parts.append(f"подраздел {c['section']}")
-
         if c.get('point'):
             ref_parts.append(f"пункт {c['point']}")
-
         if c.get('table_number'):
             ref_parts.append(f"Таблица {c['table_number']}")
 
@@ -356,23 +293,20 @@ def search_and_answer(question, selected_sources):
 
     context = "".join(context_parts)
 
-    # ✅ УЛУЧШЕННЫЙ ПРОМПТ с явным форматом
     prompt = f"""Ты — эксперт по строительным нормам и правилам (СП, СНиП, ГОСТ).
 
-ВАЖНЫЕ ПРАВИЛА ОТВЕТА:
+ВАЖНЫЕ ПРАВИЛА:
 1. Отвечай ТОЛЬКО на основе фрагментов ниже. Не выдумывай.
 2. Если во фрагментах нет ответа — честно скажи: «В найденных фрагментах нет полного ответа».
-3. Отвечай без размышлений, сразу структурированно.
+3. Отвечай структурированно, по пунктам.
 
-ФОРМАТ ОТВЕТА — для каждого требования/пункта указывай:
+ФОРМАТ ОТВЕТА (для каждого требования):
 - **Документ:** полное название (например, «СП 78.13330.2012 Автомобильные дороги»)
 - **Раздел:** номер и название (например, «8 Дорожные одежды»)
-- **Подраздел:** номер и название (если есть, например «8.4 Армирующие прослойки»)
+- **Подраздел:** номер и название (если есть)
 - **Пункт:** номер (например, 8.10)
 - **Таблица:** номер (если есть)
 - **Текст требования:** точная цитата или близкий пересказ
-
-Структурируй ответ по пунктам (1, 2, 3...). Каждый пункт — отдельное требование.
 
 ФРАГМЕНТЫ ДОКУМЕНТОВ:
 {context}
@@ -427,7 +361,6 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 📄 Документы")
-
     for src in sources_list:
         icon = "📘" if "ГОСТ" in src else "📗"
         clean_name = src.replace(".txt", "")
@@ -438,7 +371,6 @@ with st.sidebar:
             display_name = truncated + "..."
         else:
             display_name = clean_name
-
         st.markdown(
             f'<div class="doc-card">{icon} {display_name}</div>',
             unsafe_allow_html=True
@@ -472,24 +404,20 @@ st.markdown('<h1 class="main-header">🏗️ Поиск по СНиПам</h1>',
 st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
 
 
-# ==================== ПРИМЕРЫ (только если чат пуст) ====================
 if not st.session_state.messages:
     st.markdown("**💡 Примеры вопросов:**")
-
     examples = [
         ("🏗️ Асфальт", "толщина слоя асфальта"),
         ("📏 Допуски", "допуски по кернам"),
         ("🛣️ Уклон", "поперечный уклон дороги"),
         ("🌉 Мосты", "требования к мостам"),
     ]
-
     row1 = st.columns(2)
     for i, (label, query) in enumerate(examples[:2]):
         with row1[i]:
             if st.button(label, key=f"ex_{i}", use_container_width=True):
                 st.session_state.pending_question = query
                 st.rerun()
-
     row2 = st.columns(2)
     for i, (label, query) in enumerate(examples[2:], start=2):
         with row2[i - 2]:
@@ -498,7 +426,6 @@ if not st.session_state.messages:
                 st.rerun()
 
 
-# ==================== ИСТОРИЯ ЧАТА ====================
 for idx, msg in enumerate(st.session_state.messages):
     if msg["role"] == "user":
         with st.chat_message("user", avatar="👤"):
@@ -521,11 +448,9 @@ for idx, msg in enumerate(st.session_state.messages):
                             "\n".join(f"- {s}" for s in sources)
                         )
                         st.download_button(
-                            "💾 PDF",
-                            data=pdf_bytes,
+                            "💾 PDF", data=pdf_bytes,
                             file_name=f"snip_answer_{idx}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                            mime="application/pdf",
-                            key=f"dl_pdf_{idx}"
+                            mime="application/pdf", key=f"dl_pdf_{idx}"
                         )
                     except Exception as e:
                         st.caption(f"PDF: {e}")
@@ -551,7 +476,6 @@ for idx, msg in enumerate(st.session_state.messages):
             if fragments:
                 with st.expander(f"🔍 Фрагменты ({len(fragments)})", expanded=False):
                     for i, c in enumerate(fragments, 1):
-                        # ✅ Полная ссылка без обрезки
                         ref_parts = [c.get('source', '').replace('.txt', '')]
                         if c.get('chapter'):
                             ch_title = c.get('chapter_title', '')
@@ -569,7 +493,6 @@ for idx, msg in enumerate(st.session_state.messages):
                             ref_parts.append(f"пункт {c['point']}")
                         if c.get('table_number'):
                             ref_parts.append(f"Таблица {c['table_number']}")
-
                         ref = " · ".join(ref_parts)
 
                         st.markdown(f"**Фрагмент {i}** · тип: `{c.get('type', '')}`")
@@ -578,22 +501,16 @@ for idx, msg in enumerate(st.session_state.messages):
                         st.markdown("---")
 
 
-# ==================== ОБРАБОТКА ОТЛОЖЕННОГО ВОПРОСА ====================
 prefill = st.session_state.pending_question
 st.session_state.pending_question = ""
 
-# ==================== ЧАТ-ВВОД ====================
 user_input = st.chat_input("Задайте вопрос по строительным нормам...")
 
 if prefill and not user_input:
     user_input = prefill
 
 if user_input:
-    st.session_state.messages.append({
-        "role": "user",
-        "content": user_input
-    })
-
+    st.session_state.messages.append({"role": "user", "content": user_input})
     if user_input not in st.session_state.history:
         st.session_state.history.append(user_input)
 
@@ -613,7 +530,6 @@ if user_input:
                     "sources": sources,
                     "fragments": fragments
                 })
-
                 st.rerun()
 
             except Exception as e:
