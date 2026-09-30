@@ -27,6 +27,8 @@ st.markdown("""
     .sidebar-header { color: var(--primary-color); font-size: 1.3rem; font-weight: 700; margin-bottom: 0.5rem; }
     .stButton > button, .stFormSubmitButton > button { border-radius: 8px; font-weight: 600; transition: all 0.3s; }
     .stButton > button:hover, .stFormSubmitButton > button:hover { transform: translateY(-2px); }
+    /* Кнопка-лупа: убираем боковые паддинги и центрируем */
+    .stButton > button[kind="primary"] { padding-left: 0 !important; padding-right: 0 !important; justify-content: center !important; }
     .stTextInput > div > div > input { border-radius: 8px; padding: 0.75rem; font-size: 1rem; }
     [data-testid="stSidebar"] { min-width: 260px !important; max-width: 300px !important; }
     .doc-card {
@@ -411,7 +413,7 @@ with input_cols[0]:
         key="question_input"
     )
 with input_cols[1]:
-    ask_clicked = st.button("🔍 Спросить", use_container_width=True, type="primary")
+    ask_clicked = st.button("🔍", use_container_width=True, type="primary")
 
 user_input = None
 if ask_clicked and user_input_text.strip():
