@@ -42,7 +42,7 @@ st.markdown("""
         color: var(--primary-color); font-weight: 600;
     }
     .source-ref { font-size: 0.85rem; color: var(--primary-color); margin-bottom: 0.4rem; font-weight: 600; }
-    .block-container { padding-top: 1rem; padding-bottom: 4rem; }
+    .block-container { padding-top: 1rem; padding-bottom: 2rem; }
     .db-status {
         background: var(--secondary-background-color);
         border-left: 4px solid #22c55e;
@@ -53,30 +53,10 @@ st.markdown("""
         color: var(--text-color);
         margin-bottom: 0.75rem;
     }
-    /* ✅ Кнопка «Очистить историю» в нижнем левом углу */
-    .clear-history-wrap {
-        position: fixed;
-        bottom: 1rem;
-        left: 1rem;
-        z-index: 9999;
-    }
-    .clear-history-wrap button {
-        background: var(--secondary-background-color) !important;
-        color: var(--text-color) !important;
-        border: 1px solid rgba(128,128,128,0.3) !important;
-        border-radius: 8px !important;
-        font-size: 0.85rem !important;
-        padding: 0.5rem 0.75rem !important;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.15) !important;
-    }
-    .clear-history-wrap button:hover {
-        background: var(--primary-color) !important;
-        color: white !important;
-    }
     @media (max-width: 768px) {
         .main-header { font-size: 1.3rem !important; line-height: 1.2; margin-bottom: 0.3rem; }
         .main-subheader { font-size: 0.85rem; margin-bottom: 0.75rem; line-height: 1.3; }
-        .block-container { padding-top: 0.75rem !important; padding-bottom: 4rem !important; padding-left: 0.75rem !important; padding-right: 0.75rem !important; }
+        .block-container { padding-top: 0.75rem !important; padding-bottom: 3rem !important; padding-left: 0.75rem !important; padding-right: 0.75rem !important; }
         [data-testid="stSidebar"] { min-width: 0 !important; max-width: 100% !important; }
         [data-testid="stSidebar"] .doc-card { font-size: 0.75rem; padding: 0.4rem 0.6rem; }
         .stButton > button, .stFormSubmitButton > button { font-size: 0.9rem !important; padding: 0.6rem 0.8rem !important; min-height: 2.6rem; }
@@ -86,8 +66,6 @@ st.markdown("""
         .stExpander { margin-bottom: 0.5rem !important; }
         .stExpander summary { font-size: 0.9rem !important; }
         .db-status { font-size: 0.8rem; padding: 0.4rem 0.6rem; }
-        .clear-history-wrap { bottom: 0.5rem; left: 0.5rem; }
-        .clear-history-wrap button { font-size: 0.75rem !important; padding: 0.4rem 0.6rem !important; }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -376,6 +354,7 @@ if "pending_question" not in st.session_state:
     st.session_state.pending_question = ""
 
 
+# ==================== САЙДБАР ====================
 with st.sidebar:
     st.markdown(
         f'<div class="db-status">✅ База собрана · {len(sources_list)} документов</div>',
@@ -414,6 +393,15 @@ with st.sidebar:
             unsafe_allow_html=True
         )
 
+    # ✅ Кнопка «Очистить историю» — под документами, в самом низу сайдбара
+    st.markdown("")
+    if st.button("🗑️ Очистить историю", key="clear_history_btn", use_container_width=True):
+        st.session_state.messages = []
+        st.session_state.history = []
+        st.session_state.feedback = {}
+        st.rerun()
+
+    # История вопросов
     if st.session_state.history:
         st.markdown("---")
         st.markdown("### 🕐 История")
@@ -423,12 +411,7 @@ with st.sidebar:
                 st.session_state.pending_question = q
                 st.rerun()
 
-    if st.session_state.messages:
-        st.markdown("---")
-        if st.button("🗑️ Очистить чат", use_container_width=True):
-            st.session_state.messages = []
-            st.rerun()
-
+    # Оценки
     if st.session_state.feedback:
         st.markdown("---")
         st.markdown("### 📊 Оценки")
@@ -584,16 +567,3 @@ with chat_container:
                             st.markdown(f'<div class="source-ref">📄 {ref}</div>', unsafe_allow_html=True)
                             st.markdown(f"> {c['text'][:1500]}")
                             st.markdown("---")
-
-
-# ==================== КНОПКА «ОЧИСТИТЬ ИСТОРИЮ» (нижний левый угол) ====================
-# Рендерим её ПОСЛЕ всего контента, но фиксируем через CSS
-clear_col = st.container()
-with clear_col:
-    st.markdown('<div class="clear-history-wrap">', unsafe_allow_html=True)
-    if st.button("🗑️ Очистить историю", key="clear_history_btn"):
-        st.session_state.messages = []
-        st.session_state.history = []
-        st.session_state.feedback = {}
-        st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
