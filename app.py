@@ -22,8 +22,8 @@ st.set_page_config(
 st.markdown("""
 <style>
     .stApp { background: var(--background-color); }
-    .main-header { color: var(--primary-color); font-size: 1.7rem; font-weight: 700; margin-bottom: 0.5rem; line-height: 1.2; }
-    .main-subheader { color: var(--text-color); opacity: 0.7; font-size: 1rem; margin-bottom: 1.5rem; }
+    .main-header { color: var(--primary-color); font-size: 1.7rem; font-weight: 700; margin-bottom: 0.3rem; line-height: 1.2; }
+    .main-subheader { color: var(--text-color); opacity: 0.7; font-size: 1rem; margin-bottom: 1rem; }
     .sidebar-header { color: var(--primary-color); font-size: 1.3rem; font-weight: 700; margin-bottom: 0.5rem; }
     .stButton > button, .stFormSubmitButton > button { border-radius: 8px; font-weight: 600; transition: all 0.3s; }
     .stButton > button:hover, .stFormSubmitButton > button:hover { transform: translateY(-2px); }
@@ -41,11 +41,22 @@ st.markdown("""
         color: var(--primary-color); font-weight: 600;
     }
     .source-ref { font-size: 0.85rem; color: var(--primary-color); margin-bottom: 0.4rem; font-weight: 600; }
-    .block-container { padding-top: 2rem; padding-bottom: 2rem; }
+    .block-container { padding-top: 1rem; padding-bottom: 2rem; }
+    /* Плашка «База собрана» */
+    .db-status {
+        background: var(--secondary-background-color);
+        border-left: 4px solid #22c55e;
+        padding: 0.5rem 0.75rem;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: var(--text-color);
+        margin-bottom: 0.75rem;
+    }
     @media (max-width: 768px) {
         .main-header { font-size: 1.3rem !important; line-height: 1.2; margin-bottom: 0.3rem; }
-        .main-subheader { font-size: 0.85rem; margin-bottom: 1rem; line-height: 1.3; }
-        .block-container { padding-top: 1rem !important; padding-bottom: 3rem !important; padding-left: 0.75rem !important; padding-right: 0.75rem !important; }
+        .main-subheader { font-size: 0.85rem; margin-bottom: 0.75rem; line-height: 1.3; }
+        .block-container { padding-top: 0.75rem !important; padding-bottom: 3rem !important; padding-left: 0.75rem !important; padding-right: 0.75rem !important; }
         [data-testid="stSidebar"] { min-width: 0 !important; max-width: 100% !important; }
         [data-testid="stSidebar"] .doc-card { font-size: 0.75rem; padding: 0.4rem 0.6rem; }
         .stButton > button, .stFormSubmitButton > button { font-size: 0.9rem !important; padding: 0.6rem 0.8rem !important; min-height: 2.6rem; }
@@ -54,6 +65,7 @@ st.markdown("""
         .fragments-info { font-size: 0.85rem; padding: 0.6rem 0.8rem; margin: 0.75rem 0; }
         .stExpander { margin-bottom: 0.5rem !important; }
         .stExpander summary { font-size: 0.9rem !important; }
+        .db-status { font-size: 0.8rem; padding: 0.4rem 0.6rem; }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -124,21 +136,16 @@ def is_trash_fragment(c, is_definition_question=False):
     ch = c.get('chapter', '')
     ch_title = c.get('chapter_title', '')
 
-    # Раздел 3 — Термины (кроме случаев, когда спрашивают про определение)
     if not is_definition_question and ch == '3':
         return True
 
-    # Раздел 1, 2 — Область применения, Нормативные ссылки
     if ch in TRASH_CHAPTERS:
         return True
 
-    # Проверяем title
     for p in TRASH_TITLE_PATTERNS:
         if p.search(ch_title):
             return True
 
-    # ✅ Ложные «разделы» — числовые > 30 (это строки таблиц)
-    # Реальные разделы СП максимум ~20, у ГОСТ ~10
     if ch.isdigit() and int(ch) > 30:
         return True
 
@@ -249,22 +256,19 @@ def search_and_answer(question, selected_sources):
             seen.add(key)
             unique_candidates.append(c)
 
-    # ✅ Фильтр мусора
     filtered = [c for c in unique_candidates if not is_trash_fragment(c, is_definition_question)]
 
     if not filtered:
         filtered = unique_candidates
 
-    # Приоритетная сортировка
     filtered.sort(key=lambda c: (
-        0 if c.get('is_table') else 1,  # таблицы — но не главное, потом
+        0 if c.get('is_table') else 1,
         1 if c.get('chapter') not in ('', '3', '1', '2') else 0,
         len(c['text'])
     ), reverse=True)
 
     unique_filtered = filtered[:25]
 
-    # Контекст
     context_parts = []
     sources_set = []
     for c in unique_filtered:
@@ -340,9 +344,11 @@ if "pending_question" not in st.session_state:
 
 # ==================== САЙДБАР ====================
 with st.sidebar:
-    st.markdown('<div class="sidebar-header">📚 База знаний</div>', unsafe_allow_html=True)
-    st.markdown(f"**{len(sources_list)}** документов загружено")
-    st.markdown("---")
+    # ✅ Плашка «База собрана» — НАД фильтром
+    st.markdown(
+        f'<div class="db-status">✅ База собрана · {len(sources_list)} документов</div>',
+        unsafe_allow_html=True
+    )
 
     st.markdown("### 🎯 Фильтр по документам")
     selected_sources = st.multiselect(
@@ -400,8 +406,34 @@ with st.sidebar:
 
 
 # ==================== ОСНОВНОЙ КОНТЕНТ ====================
+# Заголовок — поднят выше (уменьшен padding-top у block-container)
 st.markdown('<h1 class="main-header">🏗️ Поиск по СНиПам</h1>', unsafe_allow_html=True)
 st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
+
+# ✅ Поле ввода — ПОД заголовком (text_input вместо chat_input)
+prefill = st.session_state.pending_question
+st.session_state.pending_question = ""
+
+input_cols = st.columns([5, 1])
+with input_cols[0]:
+    user_input_text = st.text_input(
+        "Вопрос",
+        value=prefill,
+        placeholder="Задайте вопрос по строительным нормам...",
+        label_visibility="collapsed",
+        key="question_input"
+    )
+with input_cols[1]:
+    ask_clicked = st.button("🔍 Спросить", use_container_width=True, type="primary")
+
+# Enter в text_input = отправка (в Streamlit это работает через submit через rerun + флаг)
+# Определяем, был ли ввод
+user_input = None
+if ask_clicked and user_input_text.strip():
+    user_input = user_input_text.strip()
+elif prefill and not ask_clicked:
+    # Если prefill пришёл из истории/примеров, но пользователь не нажал кнопку — не отправляем автоматически
+    pass
 
 
 if not st.session_state.messages:
@@ -500,14 +532,6 @@ for idx, msg in enumerate(st.session_state.messages):
                         st.markdown(f"> {c['text'][:1500]}")
                         st.markdown("---")
 
-
-prefill = st.session_state.pending_question
-st.session_state.pending_question = ""
-
-user_input = st.chat_input("Задайте вопрос по строительным нормам...")
-
-if prefill and not user_input:
-    user_input = prefill
 
 if user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
