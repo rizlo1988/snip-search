@@ -164,7 +164,6 @@ def search_and_answer(question, selected_sources):
         question, re.IGNORECASE
     ))
 
-    # 1) Векторный поиск
     try:
         vector_results = collection.query(
             query_texts=[question],
@@ -189,7 +188,6 @@ def search_and_answer(question, selected_sources):
     except Exception:
         pass
 
-    # 2) Поиск по конкретным таблицам
     table_matches = re.findall(
         r'таблиц[аы]?\s*([А-ЯA-Z]?\.?\d+(?:\.\d+)?)',
         question, re.IGNORECASE
@@ -221,7 +219,6 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-    # 3) Универсальный поиск по маркерам таблиц/приложений/допусков
     if re.search(
         r'допуск|отклонени|отметк|ширин|уклон|ровност|толщин|'
         r'предельн|значени|параметр|размер|погрешн|расстоян|'
@@ -272,7 +269,6 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-        # Специальный поиск по "Приложение А" СП 78
         try:
             app_a_query = collection.get(
                 where_document={"$contains": "Приложение А"},
@@ -298,7 +294,6 @@ def search_and_answer(question, selected_sources):
         except Exception:
             pass
 
-    # Дедупликация
     seen = set()
     unique_candidates = []
     for c in candidates:
@@ -469,7 +464,6 @@ with st.sidebar:
         st.markdown(f"👍 **{ups}** · 👎 **{downs}**")
 
 
-# ✅ Заголовок с эмодзи
 st.markdown('<h1 class="main-header">📐 Поиск по СНиПам</h1>', unsafe_allow_html=True)
 st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
 
@@ -496,6 +490,19 @@ if ask_clicked and user_input_text.strip():
 
 
 chat_container = st.container()
+
+# ✅ ЗАЩИТА ОТ ДУБЛЯ: проверяем, не добавлен ли уже такой вопрос
+if user_input:
+    # Ищем последнее сообщение пользователя
+    last_user_msg = None
+    for m in reversed(st.session_state.messages):
+        if m["role"] == "user":
+            last_user_msg = m["content"]
+            break
+
+    if last_user_msg == user_input:
+        # Уже добавлен — пропускаем
+        user_input = None
 
 if user_input:
     if re.search(r'допуск|отклонени', user_input, re.IGNORECASE) and len(user_input.split()) < 4:
