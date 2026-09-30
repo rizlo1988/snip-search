@@ -59,7 +59,6 @@ def looks_like_table_context(lines, i, window=6):
     end = min(len(lines), i + window)
     context = ' '.join(lines[start:end])
 
-    # Считаем долю строк с цифрами
     number_lines = 0
     total_nonempty = 0
     for j in range(start, end):
@@ -75,10 +74,6 @@ def looks_like_table_context(lines, i, window=6):
 
     number_ratio = number_lines / total_nonempty
 
-    # Признаки таблицы:
-    # 1) Больше 50% строк с цифрами
-    # 2) Есть единицы измерения (мм, м, кг, см, %, ‰)
-    # 3) Есть колонки (2+ пробела подряд)
     has_units = bool(re.search(r'\b(мм|см|кг|м|м/с|м/сут|‰|%|МПа|см²|м²|м³)\b', context))
     has_columns = bool(re.search(r'\s{3,}', context))
 
@@ -97,7 +92,6 @@ def parse_document(text, filename):
     lines = text.split('\n')
     total_lines = len(lines)
 
-    # Основные regex
     chapter_full_re = re.compile(r'^(\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{3,100})$')
     chapter_number_only_re = re.compile(r'^(\d{1,2})$')
     section_re = re.compile(r'^(\d{1,2}\.\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{3,100})$')
@@ -105,7 +99,6 @@ def parse_document(text, filename):
     table_re = re.compile(r'^Таблица\s+([А-ЯA-Z]?\.?\d+(?:\.\d+)?[а-яa-z]?)')
     appendix_re = re.compile(r'^Приложение\s+([А-ЯA-Z])')
 
-    # Заголовок следующей строки (для случая «8» + «Дорожные одежды»)
     title_re = re.compile(r'^[А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{3,100}$')
 
     current_chapter = ""
@@ -115,6 +108,7 @@ def parse_document(text, filename):
     current_point = ""
     current_buffer = []
     current_start_line = 0
+    in_appendix = False  # ✅ НОВОЕ: флаг нахождения внутри приложения
 
     def flush_buffer(end_line, is_table=False, table_num=""):
         nonlocal current_buffer, current_start_line
@@ -157,7 +151,6 @@ def parse_document(text, filename):
 
         is_excluded = bool(re.search(r'\(Исключен[а]?,?\s', stripped))
 
-        # Определяем, что мы в контексте таблицы (для защиты от ложных разделов)
         in_table_context = looks_like_table_context(lines, i)
 
         # 1. Новая таблица?
@@ -176,12 +169,14 @@ def parse_document(text, filename):
                 if table_re.match(next_stripped):
                     break
 
-                # НАЧАЛО НОВОГО ПУНКТА (N.N или N.N.N) — таблица закончилась
-                if re.match(r'^\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\s+[А-ЯЁ]', next_stripped):
+                # НАЧАЛО НОВОГО ПУНКТА — таблица закончилась
+                # ✅ НОВОЕ: внутри приложения не прерываем таблицу на пунктах
+                if re.match(r'^\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\s+[А-ЯЁ]', next_stripped) and not in_appendix:
                     break
 
                 # НАЧАЛО НОВОГО РАЗДЕЛА — таблица закончилась
-                if chapter_full_re.match(next_stripped):
+                # ✅ НОВОЕ: внутри приложения не прерываем таблицу на разделах
+                if chapter_full_re.match(next_stripped) and not in_appendix:
                     break
 
                 # Конец таблицы — 3 пустые строки
@@ -205,15 +200,13 @@ def parse_document(text, filename):
 
         # 2. Раздел — двухстрочный формат: "8" + "Дорожные одежды"
         chapter_num_match = chapter_number_only_re.match(stripped)
-        if chapter_num_match and not in_table_context:
-            # Проверяем следующую непустую строку
+        if chapter_num_match and not in_table_context and not in_appendix:
             j = i + 1
             while j < total_lines and not lines[j].strip():
                 j += 1
             if j < total_lines:
                 next_stripped = lines[j].strip()
                 if title_re.match(next_stripped) and len(next_stripped) > 5:
-                    # Это двухстрочный раздел
                     flush_buffer(i)
                     current_chapter = chapter_num_match.group(1)
                     current_chapter_title = next_stripped
@@ -224,8 +217,9 @@ def parse_document(text, filename):
                     continue
 
         # 3. Раздел — однострочный формат: "8 Дорожные одежды"
+        # ✅ НОВОЕ: внутри приложения не режем на разделы
         chapter_match = chapter_full_re.match(stripped)
-        if chapter_match and not in_table_context:
+        if chapter_match and not in_table_context and not in_appendix:
             flush_buffer(i)
             current_chapter = chapter_match.group(1)
             current_chapter_title = chapter_match.group(2).strip()
@@ -236,8 +230,9 @@ def parse_document(text, filename):
             continue
 
         # 4. Подраздел
+        # ✅ НОВОЕ: внутри приложения не режем на подразделы
         section_match = section_re.match(stripped)
-        if section_match and not in_table_context:
+        if section_match and not in_table_context and not in_appendix:
             flush_buffer(i)
             current_section = section_match.group(1)
             current_section_title = section_match.group(2).strip()
@@ -246,8 +241,9 @@ def parse_document(text, filename):
             continue
 
         # 5. Пункт
+        # ✅ НОВОЕ: внутри приложения не режем на пункты
         point_match = point_re.match(stripped)
-        if point_match and not is_excluded and not in_table_context:
+        if point_match and not is_excluded and not in_table_context and not in_appendix:
             flush_buffer(i)
             current_point = point_match.group(1)
             current_buffer.append(line)
@@ -263,8 +259,14 @@ def parse_document(text, filename):
             current_section = ""
             current_section_title = ""
             current_point = ""
+            in_appendix = True  # ✅ НОВОЕ: входим в приложение
             i += 1
             continue
+
+        # ✅ НОВОЕ: выход из приложения при новом разделе документа
+        # (например, "1 Общие положения" после приложения)
+        if in_appendix and chapter_full_re.match(stripped) and not in_table_context:
+            in_appendix = False
 
         # 7. Продолжение текущего пункта
         if current_buffer or current_point:
