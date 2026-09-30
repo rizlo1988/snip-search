@@ -222,14 +222,12 @@ def search_and_answer(question, selected_sources):
                 pass
 
     # 3) ✅ Универсальный поиск по маркерам таблиц/приложений/допусков
-    # Работает для всех документов: СП 78, СП 46, СП 70, СП 34, СП 126, ГОСТ 51872
     if re.search(
         r'допуск|отклонени|отметк|ширин|уклон|ровност|толщин|'
         r'предельн|значени|параметр|размер|погрешн|расстоян|'
         r'таблиц|приложени',
         question, re.IGNORECASE
     ):
-        # Маркеры таблиц и приложений — универсальные для всех СП/ГОСТ
         markers = [
             "Приложение",
             "Таблица",
@@ -251,7 +249,6 @@ def search_and_answer(question, selected_sources):
                         meta = marker_query['metadatas'][i]
                         if selected_sources and meta.get('source') not in selected_sources:
                             continue
-                        # Фильтр: оставляем только те, где есть цифры-допуски
                         if not re.search(r'[±]|\d+\s*мм|\d+,\d+', doc):
                             continue
                         candidates.append({
@@ -482,36 +479,30 @@ if user_input:
     if user_input not in st.session_state.history:
         st.session_state.history.append(user_input)
 
-    with chat_container:
-        with st.chat_message("user", avatar="👤"):
-            st.markdown(user_input)
+    with st.spinner("⏳ Ищу ответ в документах…"):
+        try:
+            answer, sources, fragments = search_and_answer(user_input, selected_sources)
 
-        with st.chat_message("assistant", avatar="🏗️"):
-            with st.spinner("⏳ Ищу ответ в документах…"):
-                try:
-                    answer, sources, fragments = search_and_answer(user_input, selected_sources)
-                    st.markdown(answer)
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer,
+                "question": user_input,
+                "sources": sources,
+                "fragments": fragments
+            })
 
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": answer,
-                        "question": user_input,
-                        "sources": sources,
-                        "fragments": fragments
-                    })
+            st.session_state.input_version += 1
 
-                    st.session_state.input_version += 1
-
-                except Exception as e:
-                    error_msg = f"Произошла ошибка: {e}"
-                    st.error(error_msg)
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": error_msg,
-                        "question": user_input,
-                        "sources": [],
-                        "fragments": []
-                    })
+        except Exception as e:
+            error_msg = f"Произошла ошибка: {e}"
+            st.error(error_msg)
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": error_msg,
+                "question": user_input,
+                "sources": [],
+                "fragments": []
+            })
 
 with chat_container:
     for idx, msg in enumerate(st.session_state.messages):
