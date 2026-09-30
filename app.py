@@ -27,7 +27,8 @@ st.markdown("""
     .sidebar-header { color: var(--primary-color); font-size: 1.3rem; font-weight: 700; margin-bottom: 0.5rem; }
     .stButton > button, .stFormSubmitButton > button { border-radius: 8px; font-weight: 600; transition: all 0.3s; }
     .stButton > button:hover, .stFormSubmitButton > button:hover { transform: translateY(-2px); }
-    .stButton > button[kind="primary"] { padding-left: 0 !important; padding-right: 0 !important; justify-content: center !important; }
+    .stButton > button[kind="primary"],
+    .stFormSubmitButton > button[kind="primary"] { padding-left: 0 !important; padding-right: 0 !important; justify-content: center !important; }
     .stTextInput > div > div > input { border-radius: 8px; padding: 0.75rem; font-size: 1rem; }
     [data-testid="stSidebar"] { min-width: 260px !important; max-width: 300px !important; }
     .doc-card {
@@ -53,6 +54,20 @@ st.markdown("""
         color: var(--text-color);
         margin-bottom: 0.75rem;
     }
+    [data-testid="stForm"] { border: none; padding: 0; }
+
+    /* ✅ ФИКСИРУЕМ заголовок + поле ввода вверху */
+    .sticky-header-wrap {
+        position: sticky;
+        top: 0;
+        z-index: 998;
+        background: var(--background-color);
+        padding-top: 0.5rem;
+        padding-bottom: 0.75rem;
+        border-bottom: 1px solid rgba(128,128,128,0.15);
+        margin-bottom: 0.5rem;
+    }
+
     @media (max-width: 768px) {
         .main-header { font-size: 1.3rem !important; line-height: 1.2; margin-bottom: 0.3rem; }
         .main-subheader { font-size: 0.85rem; margin-bottom: 0.75rem; line-height: 1.3; }
@@ -66,6 +81,7 @@ st.markdown("""
         .stExpander { margin-bottom: 0.5rem !important; }
         .stExpander summary { font-size: 0.9rem !important; }
         .db-status { font-size: 0.8rem; padding: 0.4rem 0.6rem; }
+        .sticky-header-wrap { padding-top: 0.25rem; padding-bottom: 0.5rem; }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -187,7 +203,7 @@ def search_and_answer(question, selected_sources):
     except Exception:
         pass
 
-    # 2) Поиск по конкретным таблицам (если упомянуты в вопросе)
+    # 2) Поиск по конкретным таблицам
     table_matches = re.findall(
         r'таблиц[аы]?\s*([А-ЯA-Z]?\.?\d+(?:\.\d+)?)',
         question, re.IGNORECASE
@@ -219,7 +235,7 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-    # 3) Поиск по таблицам с допусками (отметки, ширины, уклоны)
+    # 3) Поиск по таблицам с допусками
     if re.search(r'допуск|отклонени|отметк|ширин|уклон', question, re.IGNORECASE):
         try:
             table_query = collection.get(
@@ -344,6 +360,7 @@ def search_and_answer(question, selected_sources):
     return answer, sources_set, unique_filtered
 
 
+# ==================== SESSION STATE ====================
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "history" not in st.session_state:
@@ -352,6 +369,8 @@ if "feedback" not in st.session_state:
     st.session_state.feedback = {}
 if "pending_question" not in st.session_state:
     st.session_state.pending_question = ""
+if "question_input" not in st.session_state:
+    st.session_state.question_input = ""
 
 
 # ==================== САЙДБАР ====================
@@ -393,15 +412,14 @@ with st.sidebar:
             unsafe_allow_html=True
         )
 
-    # ✅ Кнопка «Очистить историю» — под документами, в самом низу сайдбара
     st.markdown("")
     if st.button("🗑️ Очистить историю", key="clear_history_btn", use_container_width=True):
         st.session_state.messages = []
         st.session_state.history = []
         st.session_state.feedback = {}
+        st.session_state.question_input = ""
         st.rerun()
 
-    # История вопросов
     if st.session_state.history:
         st.markdown("---")
         st.markdown("### 🕐 История")
@@ -411,7 +429,6 @@ with st.sidebar:
                 st.session_state.pending_question = q
                 st.rerun()
 
-    # Оценки
     if st.session_state.feedback:
         st.markdown("---")
         st.markdown("### 📊 Оценки")
@@ -420,33 +437,37 @@ with st.sidebar:
         st.markdown(f"👍 **{ups}** · 👎 **{downs}**")
 
 
-# ==================== ЗАГОЛОВОК + ПОЛЕ ВВОДА (СТАТИЧНЫЕ) ====================
-header_container = st.container()
-with header_container:
-    st.markdown('<h1 class="main-header">🏗️ Поиск по СНиПам</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
+# ==================== ЗАГОЛОВОК + ФОРМА (STICKY) ====================
+# ✅ Оборачиваем в sticky-контейнер через CSS
+st.markdown('<div class="sticky-header-wrap">', unsafe_allow_html=True)
 
-    prefill = st.session_state.pending_question
+st.markdown('<h1 class="main-header">🏗️ Поиск по СНиПам</h1>', unsafe_allow_html=True)
+st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
+
+if st.session_state.pending_question:
+    st.session_state.question_input = st.session_state.pending_question
     st.session_state.pending_question = ""
 
+with st.form("question_form", clear_on_submit=False):
     input_cols = st.columns([5, 1])
     with input_cols[0]:
         user_input_text = st.text_input(
             "Вопрос",
-            value=prefill,
+            key="question_input",
             placeholder="Задайте вопрос по строительным нормам...",
-            label_visibility="collapsed",
-            key="question_input"
+            label_visibility="collapsed"
         )
     with input_cols[1]:
-        ask_clicked = st.button("🔍", use_container_width=True, type="primary")
+        ask_clicked = st.form_submit_button("🔍", use_container_width=True, type="primary")
+
+st.markdown('</div>', unsafe_allow_html=True)
 
 user_input = None
 if ask_clicked and user_input_text.strip():
     user_input = user_input_text.strip()
 
 
-# ==================== ЧАТ (ОТВЕТЫ) ====================
+# ==================== ЧАТ ====================
 chat_container = st.container()
 
 if user_input:
@@ -481,6 +502,10 @@ if user_input:
                         "sources": sources,
                         "fragments": fragments
                     })
+
+                    # ✅ Очищаем поле БЕЗ rerun (чтобы не прыгало вверх)
+                    st.session_state.question_input = ""
+                    st.rerun()
 
                 except Exception as e:
                     error_msg = f"Произошла ошибка: {e}"
