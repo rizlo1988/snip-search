@@ -27,7 +27,6 @@ st.markdown("""
     .sidebar-header { color: var(--primary-color); font-size: 1.3rem; font-weight: 700; margin-bottom: 0.5rem; }
     .stButton > button, .stFormSubmitButton > button { border-radius: 8px; font-weight: 600; transition: all 0.3s; }
     .stButton > button:hover, .stFormSubmitButton > button:hover { transform: translateY(-2px); }
-    /* Кнопка-лупа: убираем боковые паддинги и центрируем */
     .stButton > button[kind="primary"] { padding-left: 0 !important; padding-right: 0 !important; justify-content: center !important; }
     .stTextInput > div > div > input { border-radius: 8px; padding: 0.75rem; font-size: 1rem; }
     [data-testid="stSidebar"] { min-width: 260px !important; max-width: 300px !important; }
@@ -397,156 +396,142 @@ with st.sidebar:
         st.markdown(f"👍 **{ups}** · 👎 **{downs}**")
 
 
-st.markdown('<h1 class="main-header">🏗️ Поиск по СНиПам</h1>', unsafe_allow_html=True)
-st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
+# ==================== ЗАГОЛОВОК + ПОЛЕ ВВОДА (СТАТИЧНЫЕ) ====================
+header_container = st.container()
+with header_container:
+    st.markdown('<h1 class="main-header">🏗️ Поиск по СНиПам</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
 
-prefill = st.session_state.pending_question
-st.session_state.pending_question = ""
+    prefill = st.session_state.pending_question
+    st.session_state.pending_question = ""
 
-input_cols = st.columns([5, 1])
-with input_cols[0]:
-    user_input_text = st.text_input(
-        "Вопрос",
-        value=prefill,
-        placeholder="Задайте вопрос по строительным нормам...",
-        label_visibility="collapsed",
-        key="question_input"
-    )
-with input_cols[1]:
-    ask_clicked = st.button("🔍", use_container_width=True, type="primary")
+    input_cols = st.columns([5, 1])
+    with input_cols[0]:
+        user_input_text = st.text_input(
+            "Вопрос",
+            value=prefill,
+            placeholder="Задайте вопрос по строительным нормам...",
+            label_visibility="collapsed",
+            key="question_input"
+        )
+    with input_cols[1]:
+        ask_clicked = st.button("🔍", use_container_width=True, type="primary")
 
 user_input = None
 if ask_clicked and user_input_text.strip():
     user_input = user_input_text.strip()
 
 
-if not st.session_state.messages:
-    st.markdown("**💡 Примеры вопросов:**")
-    examples = [
-        ("🏗️ Асфальт", "толщина слоя асфальта"),
-        ("📏 Допуски", "допуски по кернам"),
-        ("🛣️ Уклон", "поперечный уклон дороги"),
-        ("🌉 Мосты", "требования к мостам"),
-    ]
-    row1 = st.columns(2)
-    for i, (label, query) in enumerate(examples[:2]):
-        with row1[i]:
-            if st.button(label, key=f"ex_{i}", use_container_width=True):
-                st.session_state.pending_question = query
-                st.rerun()
-    row2 = st.columns(2)
-    for i, (label, query) in enumerate(examples[2:], start=2):
-        with row2[i - 2]:
-            if st.button(label, key=f"ex_{i}", use_container_width=True):
-                st.session_state.pending_question = query
-                st.rerun()
+# ==================== ЧАТ (ОТВЕТЫ) ====================
+chat_container = st.container()
 
-
-for idx, msg in enumerate(st.session_state.messages):
-    if msg["role"] == "user":
-        with st.chat_message("user", avatar="👤"):
-            st.markdown(msg["content"])
-    else:
-        with st.chat_message("assistant", avatar="🏗️"):
-            st.markdown(msg["content"])
-
-            q = msg.get("question", "")
-            sources = msg.get("sources", [])
-            fragments = msg.get("fragments", [])
-
-            action_cols = st.columns([1, 1, 1, 2])
-
-            with action_cols[0]:
-                if IRONPRESS_OK:
-                    try:
-                        pdf_bytes = ironpress.markdown_to_pdf(
-                            f"# {q}\n\n{msg['content']}\n\n---\n\n## Источники\n\n" +
-                            "\n".join(f"- {s}" for s in sources)
-                        )
-                        st.download_button(
-                            "💾 PDF", data=pdf_bytes,
-                            file_name=f"snip_answer_{idx}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                            mime="application/pdf", key=f"dl_pdf_{idx}"
-                        )
-                    except Exception as e:
-                        st.caption(f"PDF: {e}")
-
-            with action_cols[1]:
-                with st.popover("📋 Копировать", use_container_width=True):
-                    st.code(msg["content"], language="markdown")
-
-            with action_cols[2]:
-                fb = st.feedback("thumbs", key=f"fb_{idx}")
-                if fb is not None:
-                    st.session_state.feedback[q] = fb
-                    if fb == 1:
-                        st.toast("👍 Спасибо!")
-                    else:
-                        st.toast("👎 Учтём")
-
-            if sources:
-                with st.expander(f"📚 Источники ({len(sources)})", expanded=False):
-                    for s in sources[:15]:
-                        st.markdown(f"• {s}")
-
-            if fragments:
-                with st.expander(f"🔍 Фрагменты ({len(fragments)})", expanded=False):
-                    for i, c in enumerate(fragments, 1):
-                        ref_parts = [c.get('source', '').replace('.txt', '')]
-                        if c.get('chapter'):
-                            ch_title = c.get('chapter_title', '')
-                            if ch_title:
-                                ref_parts.append(f"раздел {c['chapter']} «{ch_title}»")
-                            else:
-                                ref_parts.append(f"раздел {c['chapter']}")
-                        if c.get('section'):
-                            sec_title = c.get('section_title', '')
-                            if sec_title:
-                                ref_parts.append(f"подраздел {c['section']} «{sec_title}»")
-                            else:
-                                ref_parts.append(f"подраздел {c['section']}")
-                        if c.get('point'):
-                            ref_parts.append(f"пункт {c['point']}")
-                        if c.get('table_number'):
-                            ref_parts.append(f"Таблица {c['table_number']}")
-                        ref = " · ".join(ref_parts)
-
-                        st.markdown(f"**Фрагмент {i}** · тип: `{c.get('type', '')}`")
-                        st.markdown(f'<div class="source-ref">📄 {ref}</div>', unsafe_allow_html=True)
-                        st.markdown(f"> {c['text'][:1500]}")
-                        st.markdown("---")
-
-
+# Если есть новый вопрос — обрабатываем ДО рендера чата, но ответ добавляем в messages
 if user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
     if user_input not in st.session_state.history:
         st.session_state.history.append(user_input)
 
-    with st.chat_message("user", avatar="👤"):
-        st.markdown(user_input)
+    with chat_container:
+        with st.chat_message("user", avatar="👤"):
+            st.markdown(user_input)
 
-    with st.chat_message("assistant", avatar="🏗️"):
-        with st.spinner("⏳ Ищу ответ в документах…"):
-            try:
-                answer, sources, fragments = search_and_answer(user_input, selected_sources)
-                st.markdown(answer)
+        with st.chat_message("assistant", avatar="🏗️"):
+            with st.spinner("⏳ Ищу ответ в документах…"):
+                try:
+                    answer, sources, fragments = search_and_answer(user_input, selected_sources)
+                    st.markdown(answer)
 
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": answer,
-                    "question": user_input,
-                    "sources": sources,
-                    "fragments": fragments
-                })
-                st.rerun()
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": answer,
+                        "question": user_input,
+                        "sources": sources,
+                        "fragments": fragments
+                    })
 
-            except Exception as e:
-                error_msg = f"Произошла ошибка: {e}"
-                st.error(error_msg)
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": error_msg,
-                    "question": user_input,
-                    "sources": [],
-                    "fragments": []
-                })
+                except Exception as e:
+                    error_msg = f"Произошла ошибка: {e}"
+                    st.error(error_msg)
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": error_msg,
+                        "question": user_input,
+                        "sources": [],
+                        "fragments": []
+                    })
+
+# Рендер всей истории (включая только что добавленный ответ)
+with chat_container:
+    for idx, msg in enumerate(st.session_state.messages):
+        if msg["role"] == "user":
+            with st.chat_message("user", avatar="👤"):
+                st.markdown(msg["content"])
+        else:
+            with st.chat_message("assistant", avatar="🏗️"):
+                st.markdown(msg["content"])
+
+                q = msg.get("question", "")
+                sources = msg.get("sources", [])
+                fragments = msg.get("fragments", [])
+
+                action_cols = st.columns([1, 1, 1, 2])
+
+                with action_cols[0]:
+                    if IRONPRESS_OK:
+                        try:
+                            pdf_bytes = ironpress.markdown_to_pdf(
+                                f"# {q}\n\n{msg['content']}\n\n---\n\n## Источники\n\n" +
+                                "\n".join(f"- {s}" for s in sources)
+                            )
+                            st.download_button(
+                                "💾 PDF", data=pdf_bytes,
+                                file_name=f"snip_answer_{idx}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                                mime="application/pdf", key=f"dl_pdf_{idx}"
+                            )
+                        except Exception as e:
+                            st.caption(f"PDF: {e}")
+
+                with action_cols[1]:
+                    with st.popover("📋 Копировать", use_container_width=True):
+                        st.code(msg["content"], language="markdown")
+
+                with action_cols[2]:
+                    fb = st.feedback("thumbs", key=f"fb_{idx}")
+                    if fb is not None:
+                        st.session_state.feedback[q] = fb
+                        if fb == 1:
+                            st.toast("👍 Спасибо!")
+                        else:
+                            st.toast("👎 Учтём")
+
+                if sources:
+                    with st.expander(f"📚 Источники ({len(sources)})", expanded=False):
+                        for s in sources[:15]:
+                            st.markdown(f"• {s}")
+
+                if fragments:
+                    with st.expander(f"🔍 Фрагменты ({len(fragments)})", expanded=False):
+                        for i, c in enumerate(fragments, 1):
+                            ref_parts = [c.get('source', '').replace('.txt', '')]
+                            if c.get('chapter'):
+                                ch_title = c.get('chapter_title', '')
+                                if ch_title:
+                                    ref_parts.append(f"раздел {c['chapter']} «{ch_title}»")
+                                else:
+                                    ref_parts.append(f"раздел {c['chapter']}")
+                            if c.get('section'):
+                                sec_title = c.get('section_title', '')
+                                if sec_title:
+                                    ref_parts.append(f"подраздел {c['section']} «{sec_title}»")
+                                else:
+                                    ref_parts.append(f"подраздел {c['section']}")
+                            if c.get('point'):
+                                ref_parts.append(f"пункт {c['point']}")
+                            if c.get('table_number'):
+                                ref_parts.append(f"Таблица {c['table_number']}")
+                            ref = " · ".join(ref_parts)
+
+                            st.markdown(f"**Фрагмент {i}** · тип: `{c.get('type', '')}`")
+                            st.markdown(f'<div class="source-ref">📄 {ref}</div>', unsafe_allow_html=True)
+                            st.markdown(f"> {c['text'][:1500]}")
+                            st.markdown("---")
