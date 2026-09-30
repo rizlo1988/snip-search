@@ -24,12 +24,7 @@ st.set_page_config(
 # ==================== КАСТОМНЫЙ CSS ====================
 st.markdown("""
 <style>
-    /* Основной фон */
-    .stApp {
-        background: var(--background-color);
-    }
-    
-    /* Заголовок */
+    .stApp { background: var(--background-color); }
     .main-header {
         color: var(--primary-color);
         font-size: 1.7rem;
@@ -43,16 +38,12 @@ st.markdown("""
         font-size: 1rem;
         margin-bottom: 1.5rem;
     }
-    
-    /* Заголовок сайдбара — синий */
     .sidebar-header {
         color: var(--primary-color);
         font-size: 1.3rem;
         font-weight: 700;
         margin-bottom: 0.5rem;
     }
-    
-    /* Кнопки */
     .stButton > button, .stFormSubmitButton > button {
         border-radius: 8px;
         font-weight: 600;
@@ -61,21 +52,15 @@ st.markdown("""
     .stButton > button:hover, .stFormSubmitButton > button:hover {
         transform: translateY(-2px);
     }
-    
-    /* Поле ввода */
     .stTextInput > div > div > input {
         border-radius: 8px;
         padding: 0.75rem;
         font-size: 1rem;
     }
-    
-    /* Сайдбар — узкий на десктопе */
     [data-testid="stSidebar"] {
         min-width: 260px !important;
         max-width: 300px !important;
     }
-    
-    /* Карточки документов */
     .doc-card {
         background: var(--secondary-background-color);
         border-left: 4px solid var(--primary-color);
@@ -85,8 +70,6 @@ st.markdown("""
         font-size: 0.8rem;
         line-height: 1.3;
     }
-    
-    /* Карточка с количеством фрагментов */
     .fragments-info {
         background: var(--secondary-background-color);
         border-radius: 8px;
@@ -95,33 +78,25 @@ st.markdown("""
         color: var(--primary-color);
         font-weight: 600;
     }
-    
-    /* Уменьшаем отступы */
+    .source-ref {
+        font-size: 0.85rem;
+        color: var(--primary-color);
+        margin-bottom: 0.4rem;
+        font-weight: 600;
+    }
     .block-container {
         padding-top: 2rem;
         padding-bottom: 2rem;
     }
-    
-    /* ===== МОБИЛЬНАЯ АДАПТАЦИЯ ===== */
     @media (max-width: 768px) {
-        .main-header {
-            font-size: 1.3rem !important;
-            line-height: 1.2;
-            margin-bottom: 0.3rem;
-        }
-        .main-subheader {
-            font-size: 0.85rem;
-            margin-bottom: 1rem;
-            line-height: 1.3;
-        }
-        
+        .main-header { font-size: 1.3rem !important; line-height: 1.2; margin-bottom: 0.3rem; }
+        .main-subheader { font-size: 0.85rem; margin-bottom: 1rem; line-height: 1.3; }
         .block-container {
             padding-top: 1rem !important;
-            padding-bottom: 5rem !important;
+            padding-bottom: 3rem !important;
             padding-left: 0.75rem !important;
             padding-right: 0.75rem !important;
         }
-        
         [data-testid="stSidebar"] {
             min-width: 0 !important;
             max-width: 100% !important;
@@ -130,32 +105,29 @@ st.markdown("""
             font-size: 0.75rem;
             padding: 0.4rem 0.6rem;
         }
-        
         .stButton > button,
         .stFormSubmitButton > button {
             font-size: 0.9rem !important;
             padding: 0.6rem 0.8rem !important;
             min-height: 2.6rem;
         }
-        
+        .stFormSubmitButton > button {
+            font-size: 1rem !important;
+            padding: 0.75rem 1.5rem !important;
+            min-height: 3rem !important;
+        }
         .stTextInput > div > div > input {
             font-size: 1rem !important;
             padding: 0.75rem !important;
             min-height: 2.75rem;
         }
-        
         .fragments-info {
             font-size: 0.85rem;
             padding: 0.6rem 0.8rem;
             margin: 0.75rem 0;
         }
-        
-        .stExpander {
-            margin-bottom: 0.5rem !important;
-        }
-        .stExpander summary {
-            font-size: 0.9rem !important;
-        }
+        .stExpander { margin-bottom: 0.5rem !important; }
+        .stExpander summary { font-size: 0.9rem !important; }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -219,7 +191,7 @@ sources_list = count_sources()
 
 # ==================== ФУНКЦИЯ ПОИСКА ====================
 def search_and_answer(question, selected_sources):
-    """Выполняет гибридный поиск и возвращает (answer, sources, fragments)."""
+    """Гибридный поиск: вектор + таблицы + ключевые слова."""
     candidates = []
 
     where_filter = None
@@ -238,9 +210,14 @@ def search_and_answer(question, selected_sources):
                 meta = vector_results['metadatas'][0][i]
                 candidates.append({
                     'text': doc,
-                    'source': meta['source'],
+                    'source': meta.get('source', ''),
+                    'chapter': meta.get('chapter', ''),
+                    'chapter_title': meta.get('chapter_title', ''),
                     'section': meta.get('section', ''),
-                    'tables': meta.get('tables', ''),
+                    'section_title': meta.get('section_title', ''),
+                    'point': meta.get('point', ''),
+                    'is_table': meta.get('is_table', False),
+                    'table_number': meta.get('table_number', ''),
                     'type': 'векторный'
                 })
     except Exception:
@@ -251,9 +228,14 @@ def search_and_answer(question, selected_sources):
                     meta = vector_results['metadatas'][0][i]
                     candidates.append({
                         'text': doc,
-                        'source': meta['source'],
+                        'source': meta.get('source', ''),
+                        'chapter': meta.get('chapter', ''),
+                        'chapter_title': meta.get('chapter_title', ''),
                         'section': meta.get('section', ''),
-                        'tables': meta.get('tables', ''),
+                        'section_title': meta.get('section_title', ''),
+                        'point': meta.get('point', ''),
+                        'is_table': meta.get('is_table', False),
+                        'table_number': meta.get('table_number', ''),
                         'type': 'векторный (без фильтра)'
                     })
 
@@ -273,13 +255,18 @@ def search_and_answer(question, selected_sources):
                 if table_results['documents']:
                     for i, doc in enumerate(table_results['documents']):
                         meta = table_results['metadatas'][i]
-                        if selected_sources and meta['source'] not in selected_sources:
+                        if selected_sources and meta.get('source') not in selected_sources:
                             continue
                         candidates.append({
                             'text': doc,
-                            'source': meta['source'],
+                            'source': meta.get('source', ''),
+                            'chapter': meta.get('chapter', ''),
+                            'chapter_title': meta.get('chapter_title', ''),
                             'section': meta.get('section', ''),
-                            'tables': meta.get('tables', ''),
+                            'section_title': meta.get('section_title', ''),
+                            'point': meta.get('point', ''),
+                            'is_table': meta.get('is_table', False),
+                            'table_number': meta.get('table_number', ''),
                             'type': f'таблица {table_num}'
                         })
             except Exception:
@@ -298,9 +285,14 @@ def search_and_answer(question, selected_sources):
                     meta = keyword_results['metadatas'][0][i]
                     candidates.append({
                         'text': doc,
-                        'source': meta['source'],
+                        'source': meta.get('source', ''),
+                        'chapter': meta.get('chapter', ''),
+                        'chapter_title': meta.get('chapter_title', ''),
                         'section': meta.get('section', ''),
-                        'tables': meta.get('tables', ''),
+                        'section_title': meta.get('section_title', ''),
+                        'point': meta.get('point', ''),
+                        'is_table': meta.get('is_table', False),
+                        'table_number': meta.get('table_number', ''),
                         'type': 'ключевые слова'
                     })
         except Exception:
@@ -313,7 +305,8 @@ def search_and_answer(question, selected_sources):
         has_number = bool(re.search(r'\d+', c['text']))
         has_keyword = any(
             word in text_lower
-            for word in ['допуск', 'отклонен', 'мм', 'таблиц', 'не более']
+            for word in ['допуск', 'отклонен', 'мм', 'таблиц', 'не более',
+                         'толщин', 'слоя', 'устройств', 'требован']
         )
         if has_number and has_keyword:
             filtered.append(c)
@@ -321,36 +314,50 @@ def search_and_answer(question, selected_sources):
     if not filtered:
         filtered = candidates
 
-    # Убираем дубли
+    # Дедупликация
     seen = set()
     unique_filtered = []
     for c in filtered:
-        if c['text'] not in seen:
-            seen.add(c['text'])
+        key = c['text'][:200]
+        if key not in seen:
+            seen.add(key)
             unique_filtered.append(c)
 
     unique_filtered = unique_filtered[:25]
 
-    # Формируем контекст
-    context = ""
-    sources = []
+    # Формируем контекст с полными ссылками
+    context_parts = []
+    sources_set = []
     for c in unique_filtered:
-        ref = c['source']
-        if c['section']:
-            ref += f", раздел {c['section']}"
-        if c['tables']:
-            ref += f", таблица {c['tables']}"
-        context += f"\n\n--- Источник: {ref} ---\n{c['text']}"
-        if ref not in sources:
-            sources.append(ref)
+        # Собираем полную ссылку: документ, раздел, пункт, таблица
+        ref_parts = [c['source'].replace('.txt', '')]
+        if c.get('section') and c.get('section_title'):
+            ref_parts.append(f"раздел {c['section']} «{c['section_title']}»")
+        elif c.get('section'):
+            ref_parts.append(f"раздел {c['section']}")
+        if c.get('point'):
+            ref_parts.append(f"п. {c['point']}")
+        if c.get('table_number'):
+            ref_parts.append(f"Таблица {c['table_number']}")
+        ref = ", ".join(ref_parts)
+
+        context_parts.append(f"\n\n--- Источник: {ref} ---\n{c['text']}")
+        if ref not in sources_set:
+            sources_set.append(ref)
+
+    context = "".join(context_parts)
 
     # Промпт
     prompt = f"""Не размышляй. Сразу давай ответ.
 Ты — эксперт по строительным нормам и правилам.
-Отвечай подробно. Приведи ВСЕ найденные допуски и отклонения из фрагментов.
+Отвечай подробно. Приведи ВСЕ найденные требования, допуски и отклонения из фрагментов.
 Структурируй ответ: раздели на пункты, для каждого укажи значение и источник.
 Если в фрагментах нет ответа — честно скажи об этом.
-Обязательно укажи, из какого документа, раздела и пункта взята информация.
+Для каждого требования обязательно указывай:
+- документ (СП/ГОСТ)
+- раздел и подраздел
+- номер пункта
+- номер таблицы (если есть)
 
 ФРАГМЕНТЫ ДОКУМЕНТОВ:
 {context}
@@ -367,18 +374,18 @@ def search_and_answer(question, selected_sources):
     )
 
     answer = response.choices[0].message.content
-    return answer, sources, unique_filtered
+    return answer, sources_set, unique_filtered
 
 
-# ==================== ИНИЦИАЛИЗАЦИЯ SESSION STATE ====================
+# ==================== SESSION STATE ====================
 if "messages" not in st.session_state:
-    st.session_state.messages = []  # [{"role": "user"/"assistant", "content", "sources", "fragments", "question"}]
+    st.session_state.messages = []
 if "history" not in st.session_state:
-    st.session_state.history = []  # список вопросов
+    st.session_state.history = []
 if "feedback" not in st.session_state:
-    st.session_state.feedback = {}  # {вопрос: 1 или 0}
+    st.session_state.feedback = {}
 if "pending_question" not in st.session_state:
-    st.session_state.pending_question = ""  # от клика по истории
+    st.session_state.pending_question = ""
 
 
 # ==================== САЙДБАР ====================
@@ -386,8 +393,7 @@ with st.sidebar:
     st.markdown('<div class="sidebar-header">📚 База знаний</div>', unsafe_allow_html=True)
     st.markdown(f"**{len(sources_list)}** документов загружено")
     st.markdown("---")
-    
-    # Фильтр по документам
+
     st.markdown("### 🎯 Фильтр по документам")
     selected_sources = st.multiselect(
         "Искать только в:",
@@ -397,15 +403,15 @@ with st.sidebar:
         format_func=lambda x: x.replace(".txt", "")[:40] + "...",
         key="source_filter"
     )
-    
+
     if selected_sources:
         st.caption(f"🔍 Поиск в **{len(selected_sources)}** документ(ах)")
     else:
         st.caption("🔍 Поиск во **всех** документах")
-    
+
     st.markdown("---")
-    
     st.markdown("### 📄 Документы")
+
     for src in sources_list:
         if "ГОСТ" in src:
             icon = "📘"
@@ -413,7 +419,7 @@ with st.sidebar:
             icon = "📗"
         else:
             icon = "📄"
-        
+
         clean_name = src.replace(".txt", "")
         if len(clean_name) > 40:
             truncated = clean_name[:40]
@@ -422,30 +428,27 @@ with st.sidebar:
             display_name = truncated + "..."
         else:
             display_name = clean_name
-        
+
         st.markdown(
             f'<div class="doc-card">{icon} {display_name}</div>',
             unsafe_allow_html=True
         )
-    
-    # История — кликабельная
+
     if st.session_state.history:
         st.markdown("---")
         st.markdown("### 🕐 История")
-        st.caption("Нажми — вопрос вставится в поле ввода внизу")
+        st.caption("Нажми — вопрос вставится в поле ввода")
         for i, q in enumerate(reversed(st.session_state.history[-10:])):
             if st.button(f"↻ {q[:50]}", key=f"hist_{i}", use_container_width=True):
                 st.session_state.pending_question = q
                 st.rerun()
-    
-    # Кнопка очистки чата
+
     if st.session_state.messages:
         st.markdown("---")
         if st.button("🗑️ Очистить чат", use_container_width=True):
             st.session_state.messages = []
             st.rerun()
-    
-    # Счётчик оценок
+
     if st.session_state.feedback:
         st.markdown("---")
         st.markdown("### 📊 Оценки")
@@ -462,21 +465,21 @@ st.markdown('<p class="main-subheader">Задайте вопрос — прог�
 # ==================== ПРИМЕРЫ (только если чат пуст) ====================
 if not st.session_state.messages:
     st.markdown("**💡 Примеры вопросов:**")
-    
+
     examples = [
         ("🏗️ Асфальт", "толщина слоя асфальта"),
         ("📏 Допуски", "допуски по кернам"),
         ("🛣️ Уклон", "поперечный уклон дороги"),
         ("🌉 Мосты", "требования к мостам"),
     ]
-    
+
     row1 = st.columns(2)
     for i, (label, query) in enumerate(examples[:2]):
         with row1[i]:
             if st.button(label, key=f"ex_{i}", use_container_width=True):
                 st.session_state.pending_question = query
                 st.rerun()
-    
+
     row2 = st.columns(2)
     for i, (label, query) in enumerate(examples[2:], start=2):
         with row2[i - 2]:
@@ -493,14 +496,13 @@ for idx, msg in enumerate(st.session_state.messages):
     else:
         with st.chat_message("assistant", avatar="🏗️"):
             st.markdown(msg["content"])
-            
-            # Кнопки действий для этого ответа
+
             q = msg.get("question", "")
             sources = msg.get("sources", [])
             fragments = msg.get("fragments", [])
-            
+
             action_cols = st.columns([1, 1, 1, 2])
-            
+
             with action_cols[0]:
                 if IRONPRESS_OK:
                     try:
@@ -517,11 +519,11 @@ for idx, msg in enumerate(st.session_state.messages):
                         )
                     except Exception as e:
                         st.caption(f"PDF: {e}")
-            
+
             with action_cols[1]:
                 with st.popover("📋 Копировать", use_container_width=True):
                     st.code(msg["content"], language="markdown")
-            
+
             with action_cols[2]:
                 fb = st.feedback("thumbs", key=f"fb_{idx}")
                 if fb is not None:
@@ -530,60 +532,67 @@ for idx, msg in enumerate(st.session_state.messages):
                         st.toast("👍 Спасибо!")
                     else:
                         st.toast("👎 Учтём")
-            
+
             if sources:
                 with st.expander(f"📚 Источники ({len(sources)})", expanded=False):
                     for s in sources[:15]:
                         st.markdown(f"• {s}")
-            
+
             if fragments:
                 with st.expander(f"🔍 Фрагменты ({len(fragments)})", expanded=False):
                     for i, c in enumerate(fragments, 1):
-                        ref = c['source']
-                        if c['section']:
-                            ref += f", раздел {c['section']}"
-                        if c['tables']:
-                            ref += f", таблица {c['tables']}"
-                        st.markdown(f"**Фрагмент {i}** · *{ref}* · тип: `{c['type']}`")
-                        st.markdown(f"> {c['text']}")
+                        # Формируем читаемую ссылку
+                        ref_parts = [c.get('source', '').replace('.txt', '')]
+                        if c.get('chapter'):
+                            ch_title = c.get('chapter_title', '')[:50]
+                            ref_parts.append(f"раздел {c['chapter']} «{ch_title}»")
+                        if c.get('section'):
+                            sec_title = c.get('section_title', '')[:50]
+                            if sec_title:
+                                ref_parts.append(f"подраздел {c['section']} «{sec_title}»")
+                            else:
+                                ref_parts.append(f"подраздел {c['section']}")
+                        if c.get('point'):
+                            ref_parts.append(f"пункт {c['point']}")
+                        if c.get('table_number'):
+                            ref_parts.append(f"Таблица {c['table_number']}")
+
+                        ref = " · ".join(ref_parts)
+
+                        st.markdown(f"**Фрагмент {i}** · тип: `{c.get('type', '')}`")
+                        st.markdown(f'<div class="source-ref">📄 {ref}</div>', unsafe_allow_html=True)
+                        st.markdown(f"> {c['text'][:1500]}")
                         st.markdown("---")
 
 
 # ==================== ОБРАБОТКА ОТЛОЖЕННОГО ВОПРОСА ====================
-# Если кликнули по примеру или истории — берём из pending_question
 prefill = st.session_state.pending_question
 st.session_state.pending_question = ""
 
 # ==================== ЧАТ-ВВОД ====================
 user_input = st.chat_input("Задайте вопрос по строительным нормам...")
 
-# Если есть pending_question — используем его вместо chat_input
 if prefill and not user_input:
     user_input = prefill
 
 if user_input:
-    # Добавляем сообщение пользователя
     st.session_state.messages.append({
         "role": "user",
         "content": user_input
     })
-    
-    # Сохраняем в историю
+
     if user_input not in st.session_state.history:
         st.session_state.history.append(user_input)
-    
-    # Показываем сообщение пользователя сразу
+
     with st.chat_message("user", avatar="👤"):
         st.markdown(user_input)
-    
-    # Обрабатываем
+
     with st.chat_message("assistant", avatar="🏗️"):
         with st.spinner("⏳ Ищу ответ в документах…"):
             try:
                 answer, sources, fragments = search_and_answer(user_input, selected_sources)
                 st.markdown(answer)
-                
-                # Сохраняем ответ
+
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": answer,
@@ -591,9 +600,9 @@ if user_input:
                     "sources": sources,
                     "fragments": fragments
                 })
-                
-                st.rerun()  # перерисовываем, чтобы отобразились кнопки действий
-                
+
+                st.rerun()
+
             except Exception as e:
                 error_msg = f"Произошла ошибка: {e}"
                 st.error(error_msg)
