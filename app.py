@@ -221,7 +221,7 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-    # 3) Универсальный поиск по маркерам
+    # 3) Универсальный поиск по маркерам таблиц/приложений/допусков
     if re.search(
         r'допуск|отклонени|отметк|ширин|уклон|ровност|толщин|'
         r'предельн|значени|параметр|размер|погрешн|расстоян|'
@@ -229,7 +229,6 @@ def search_and_answer(question, selected_sources):
         question, re.IGNORECASE
     ):
         markers = [
-            "Приложение",
             "Таблица",
             "Допускаемые отклонения",
             "Допускаемые значения",
@@ -272,11 +271,11 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-        # Специальный поиск по "Приложение А" СП 78
+        # ✅ СПЕЦИАЛЬНЫЙ ПОИСК: Таблица А.1 СП 78 (допуски на дорожные работы)
         try:
             app_a_query = collection.get(
-                where_document={"$contains": "Приложение А"},
-                limit=30
+                where_document={"$contains": "Таблица А.1"},
+                limit=10
             )
             if app_a_query['documents']:
                 for i, doc in enumerate(app_a_query['documents']):
@@ -292,8 +291,33 @@ def search_and_answer(question, selected_sources):
                         'section_title': meta.get('section_title', ''),
                         'point': meta.get('point', ''),
                         'is_table': True,
-                        'table_number': meta.get('table_number', ''),
-                        'type': 'Приложение А (полное)'
+                        'table_number': 'А.1',
+                        'type': 'Таблица А.1 (допуски)'
+                    })
+        except Exception:
+            pass
+
+        # ✅ ДОПОЛНИТЕЛЬНО: Таблица А.1 только из СП 78
+        try:
+            app_a_sp78 = collection.get(
+                where_document={"$contains": "Таблица А.1"},
+                where={"source": "СП 78.13330.2012 Автомобильные дороги.txt"},
+                limit=5
+            )
+            if app_a_sp78['documents']:
+                for i, doc in enumerate(app_a_sp78['documents']):
+                    meta = app_a_sp78['metadatas'][i]
+                    candidates.append({
+                        'text': doc,
+                        'source': meta.get('source', ''),
+                        'chapter': meta.get('chapter', ''),
+                        'chapter_title': meta.get('chapter_title', ''),
+                        'section': meta.get('section', ''),
+                        'section_title': meta.get('section_title', ''),
+                        'point': meta.get('point', ''),
+                        'is_table': True,
+                        'table_number': 'А.1',
+                        'type': 'Таблица А.1 СП 78 (допуски)'
                     })
         except Exception:
             pass
@@ -496,16 +520,15 @@ if ask_clicked and user_input_text.strip():
 
 chat_container = st.container()
 
-# ✅ ЗАЩИТА ОТ ДУБЛЯ: проверяем, не добавлен ли уже такой вопрос
+# ✅ ЗАЩИТА ОТ ДУБЛЯ
 if user_input:
     last_user_msg = None
     for m in reversed(st.session_state.messages):
         if m["role"] == "user":
             last_user_msg = m["content"]
             break
-
     if last_user_msg == user_input:
-        user_input = None  # уже добавлен — пропускаем
+        user_input = None
 
 if user_input:
     if re.search(r'допуск|отклонени', user_input, re.IGNORECASE) and len(user_input.split()) < 4:
