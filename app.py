@@ -55,19 +55,6 @@ st.markdown("""
         margin-bottom: 0.75rem;
     }
     [data-testid="stForm"] { border: none; padding: 0; }
-
-    /* ✅ ФИКСИРУЕМ заголовок + поле ввода вверху */
-    .sticky-header-wrap {
-        position: sticky;
-        top: 0;
-        z-index: 998;
-        background: var(--background-color);
-        padding-top: 0.5rem;
-        padding-bottom: 0.75rem;
-        border-bottom: 1px solid rgba(128,128,128,0.15);
-        margin-bottom: 0.5rem;
-    }
-
     @media (max-width: 768px) {
         .main-header { font-size: 1.3rem !important; line-height: 1.2; margin-bottom: 0.3rem; }
         .main-subheader { font-size: 0.85rem; margin-bottom: 0.75rem; line-height: 1.3; }
@@ -81,7 +68,6 @@ st.markdown("""
         .stExpander { margin-bottom: 0.5rem !important; }
         .stExpander summary { font-size: 0.9rem !important; }
         .db-status { font-size: 0.8rem; padding: 0.4rem 0.6rem; }
-        .sticky-header-wrap { padding-top: 0.25rem; padding-bottom: 0.5rem; }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -178,7 +164,6 @@ def search_and_answer(question, selected_sources):
         question, re.IGNORECASE
     ))
 
-    # 1) Векторный поиск
     try:
         vector_results = collection.query(
             query_texts=[question],
@@ -203,7 +188,6 @@ def search_and_answer(question, selected_sources):
     except Exception:
         pass
 
-    # 2) Поиск по конкретным таблицам
     table_matches = re.findall(
         r'таблиц[аы]?\s*([А-ЯA-Z]?\.?\d+(?:\.\d+)?)',
         question, re.IGNORECASE
@@ -235,7 +219,6 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-    # 3) Поиск по таблицам с допусками
     if re.search(r'допуск|отклонени|отметк|ширин|уклон', question, re.IGNORECASE):
         try:
             table_query = collection.get(
@@ -264,7 +247,6 @@ def search_and_answer(question, selected_sources):
         except Exception:
             pass
 
-    # Дедупликация
     seen = set()
     unique_candidates = []
     for c in candidates:
@@ -369,8 +351,9 @@ if "feedback" not in st.session_state:
     st.session_state.feedback = {}
 if "pending_question" not in st.session_state:
     st.session_state.pending_question = ""
-if "question_input" not in st.session_state:
-    st.session_state.question_input = ""
+# ✅ Счётчик для смены key поля ввода (чтобы очищать без rerun)
+if "input_version" not in st.session_state:
+    st.session_state.input_version = 0
 
 
 # ==================== САЙДБАР ====================
@@ -417,7 +400,7 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.history = []
         st.session_state.feedback = {}
-        st.session_state.question_input = ""
+        st.session_state.input_version += 1
         st.rerun()
 
     if st.session_state.history:
@@ -437,30 +420,27 @@ with st.sidebar:
         st.markdown(f"👍 **{ups}** · 👎 **{downs}**")
 
 
-# ==================== ЗАГОЛОВОК + ФОРМА (STICKY) ====================
-# ✅ Оборачиваем в sticky-контейнер через CSS
-st.markdown('<div class="sticky-header-wrap">', unsafe_allow_html=True)
-
+# ==================== ЗАГОЛОВОК + ФОРМА ====================
 st.markdown('<h1 class="main-header">🏗️ Поиск по СНиПам</h1>', unsafe_allow_html=True)
 st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
 
-if st.session_state.pending_question:
-    st.session_state.question_input = st.session_state.pending_question
-    st.session_state.pending_question = ""
+# ✅ Ключ поля зависит от input_version — при инкременте поле очищается
+input_key = f"question_input_{st.session_state.input_version}"
+prefill_value = st.session_state.pending_question if st.session_state.pending_question else ""
+st.session_state.pending_question = ""
 
 with st.form("question_form", clear_on_submit=False):
     input_cols = st.columns([5, 1])
     with input_cols[0]:
         user_input_text = st.text_input(
             "Вопрос",
-            key="question_input",
+            value=prefill_value,
             placeholder="Задайте вопрос по строительным нормам...",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            key=input_key
         )
     with input_cols[1]:
         ask_clicked = st.form_submit_button("🔍", use_container_width=True, type="primary")
-
-st.markdown('</div>', unsafe_allow_html=True)
 
 user_input = None
 if ask_clicked and user_input_text.strip():
@@ -503,9 +483,8 @@ if user_input:
                         "fragments": fragments
                     })
 
-                    # ✅ Очищаем поле БЕЗ rerun (чтобы не прыгало вверх)
-                    st.session_state.question_input = ""
-                    st.rerun()
+                    # ✅ Меняем версию ключа → поле очистится БЕЗ rerun
+                    st.session_state.input_version += 1
 
                 except Exception as e:
                     error_msg = f"Произошла ошибка: {e}"
