@@ -21,14 +21,11 @@ st.set_page_config(
 
 
 # ==================== ЛОГИРОВАНИЕ ОЦЕНОК ====================
-# Опционально: сюда можно вставить URL Google Apps Script Web App,
-# и оценки будут уходить в таблицу. Пока — пишем в консоль Streamlit.
 
-FEEDBACK_WEBHOOK_URL = ""  # ← вставьте сюда URL из Apps Script, если нужно
+FEEDBACK_WEBHOOK_URL = ""  # ← сюда можно вставить URL Google Apps Script
 
 
 def log_feedback(question, answer, rating, fragments_count=0):
-    """Сохраняет оценку. Если задан webhook — отправляет POST."""
     payload = {
         "timestamp": datetime.now().isoformat(),
         "question": question,
@@ -36,8 +33,6 @@ def log_feedback(question, answer, rating, fragments_count=0):
         "rating": int(rating),
         "fragments_count": fragments_count,
     }
-
-    # Всегда пишем в консоль (видно в Streamlit Cloud → Logs)
     print(f"[FEEDBACK] {payload}")
 
     if FEEDBACK_WEBHOOK_URL:
@@ -91,10 +86,33 @@ st.markdown("""
         margin-bottom: 0.75rem;
     }
     [data-testid="stForm"] { border: none; padding: 0; }
+
+    /* ✅ НОВОЕ: часы в правом верхнем углу */
+    .top-clock {
+        position: fixed;
+        top: 12px;
+        right: 20px;
+        z-index: 999999;
+        background: var(--secondary-background-color);
+        color: var(--text-color);
+        padding: 6px 14px;
+        border-radius: 8px;
+        font-size: 0.9rem;
+        font-weight: 600;
+        font-family: 'SF Mono', 'Consolas', 'Menlo', monospace;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        border: 1px solid rgba(128,128,128,0.2);
+        pointer-events: none;
+        white-space: nowrap;
+    }
+    .top-clock .clock-date { color: var(--text-color); opacity: 0.75; }
+    .top-clock .clock-sep { color: var(--text-color); opacity: 0.4; margin: 0 4px; }
+    .top-clock .clock-time { color: var(--primary-color); }
+
     @media (max-width: 768px) {
         .main-header { font-size: 1.3rem !important; line-height: 1.2; margin-bottom: 0.3rem; }
         .main-subheader { font-size: 0.85rem; margin-bottom: 0.75rem; line-height: 1.3; }
-        .block-container { padding-top: 0.75rem !important; padding-bottom: 3rem !important; padding-left: 0.75rem !important; padding-right: 0.75rem !important; }
+        .block-container { padding-top: 3.5rem !important; padding-bottom: 3rem !important; padding-left: 0.75rem !important; padding-right: 0.75rem !important; }
         [data-testid="stSidebar"] { min-width: 0 !important; max-width: 100% !important; }
         [data-testid="stSidebar"] .doc-card { font-size: 0.75rem; padding: 0.4rem 0.6rem; }
         .stButton > button, .stFormSubmitButton > button { font-size: 0.9rem !important; padding: 0.6rem 0.8rem !important; min-height: 2.6rem; }
@@ -104,9 +122,58 @@ st.markdown("""
         .stExpander { margin-bottom: 0.5rem !important; }
         .stExpander summary { font-size: 0.9rem !important; }
         .db-status { font-size: 0.8rem; padding: 0.4rem 0.6rem; }
+
+        /* ✅ НОВОЕ: уменьшенные часы на мобильных */
+        .top-clock {
+            top: 6px;
+            right: 8px;
+            padding: 4px 8px;
+            font-size: 0.7rem;
+            border-radius: 6px;
+        }
     }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ✅ НОВОЕ: инъекция часов в правый верхний угол
+# Используем JS-компонент, чтобы время было локальное (по браузеру пользователя)
+import streamlit.components.v1 as components
+
+components.html("""
+<script>
+(function() {
+    // Находим родительский документ Streamlit
+    const parentDoc = window.parent.document;
+
+    // Удаляем старые часы, если перерендерилось
+    const old = parentDoc.querySelector('.top-clock');
+    if (old) old.remove();
+
+    // Создаём контейнер
+    const clock = parentDoc.createElement('div');
+    clock.className = 'top-clock';
+    clock.innerHTML = '<span class="clock-date"></span><span class="clock-sep">·</span><span class="clock-time"></span>';
+    parentDoc.body.appendChild(clock);
+
+    const dateEl = clock.querySelector('.clock-date');
+    const timeEl = clock.querySelector('.clock-time');
+
+    function pad(n) { return n < 10 ? '0' + n : '' + n; }
+
+    function tick() {
+        const d = new Date();
+        const dateStr = pad(d.getDate()) + '.' + pad(d.getMonth() + 1) + '.' + d.getFullYear();
+        const timeStr = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+        dateEl.textContent = dateStr;
+        timeEl.textContent = timeStr;
+    }
+
+    tick();
+    setInterval(tick, 1000);
+})();
+</script>
+""", height=0)
 
 
 @st.cache_resource
@@ -169,7 +236,6 @@ TRASH_TITLE_PATTERNS = [
     re.compile(r'Область применения', re.IGNORECASE),
 ]
 
-# ✅ ФИКС D: специфичные "мусорные" разделы для конкретных документов.
 BAD_CHAPTERS_BY_DOC = {
     'НЕСУЩИЕ И ОГРАЖДАЮЩИЕ': {
         '4', '5', '6', '7', '8', '13', '14',
@@ -177,7 +243,6 @@ BAD_CHAPTERS_BY_DOC = {
     },
 }
 
-# ✅ ФИКС D: заголовки, которые являются строками таблиц, а не разделами
 BAD_TITLE_PREFIXES = (
     'Отклонение',
     'Разность',
@@ -193,18 +258,14 @@ def is_trash_fragment(c, is_definition_question=False):
 
     if not is_definition_question and ch == '3':
         return True
-
     if ch in TRASH_CHAPTERS:
         return True
-
     for p in TRASH_TITLE_PATTERNS:
         if p.search(ch_title):
             return True
-
     if ch.isdigit() and int(ch) > 30:
         return True
 
-    # ✅ ФИКС D: мусор из таблиц СП 70 (и подобных документов)
     for doc_key, bad_chapters in BAD_CHAPTERS_BY_DOC.items():
         if doc_key in source and ch in bad_chapters:
             title_stripped = ch_title.strip()
@@ -335,7 +396,7 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-        # ✅ ПОИСК ПО МЕТАДАННЫМ: Таблица А.1
+        # ПОИСК ПО МЕТАДАННЫМ: Таблица А.1
         try:
             meta_query = collection.get(
                 where={"$and": [
@@ -366,7 +427,7 @@ def search_and_answer(question, selected_sources):
         except Exception:
             pass
 
-        # ✅ ДОПОЛНИТЕЛЬНО: поиск по "$contains" Таблица А.1
+        # ДОПОЛНИТЕЛЬНО: поиск по "$contains" Таблица А.1
         try:
             app_a_query = collection.get(
                 where_document={"$contains": "Таблица А.1"},
@@ -402,11 +463,9 @@ def search_and_answer(question, selected_sources):
             unique_candidates.append(c)
 
     filtered = [c for c in unique_candidates if not is_trash_fragment(c, is_definition_question)]
-
     if not filtered:
         filtered = unique_candidates
 
-    # ✅ СОРТИРОВКА С ПРИОРИТЕТОМ ДЛЯ ТАБЛИЦЫ А.1
     filtered.sort(key=lambda c: (
         0 if 'Таблица А.1' in c.get('type', '') else 1,
         0 if c.get('is_table') else 1,
@@ -414,7 +473,7 @@ def search_and_answer(question, selected_sources):
         len(c['text'])
     ), reverse=True)
 
-    # ✅ ФИКС A: было [:25] — Qwen не успевал обработать и обрывался
+    # ✅ ФИКС A: было [:25]
     unique_filtered = filtered[:12]
 
     context_parts = []
@@ -491,7 +550,7 @@ def search_and_answer(question, selected_sources):
     response = client.chat.completions.create(
         model="Qwen/Qwen3-30B-A3B",
         messages=[{"role": "user", "content": prompt}],
-        # ✅ ФИКС B: было 2500 — Qwen обрывался на полуслове
+        # ✅ ФИКС B: было 2500
         max_tokens=3000,
         extra_body={"enable_thinking": False}
     )
@@ -512,7 +571,6 @@ if "pending_question" not in st.session_state:
     st.session_state.pending_question = ""
 if "input_version" not in st.session_state:
     st.session_state.input_version = 0
-# ✅ НОВОЕ: флаги для активных оценок
 if "retry_question" not in st.session_state:
     st.session_state.retry_question = None
 if "expanded_search" not in st.session_state:
@@ -580,17 +638,39 @@ with st.sidebar:
                 st.session_state.input_version += 1
                 st.rerun()
 
-    # ✅ НОВОЕ: счётчик оценок с % качества и сбросом
+    # ✅ ЦВЕТНЫЕ ОЦЕНКИ: 👍 зелёный, 👎 красный
     if st.session_state.feedback:
         st.markdown("---")
         st.markdown("### 📊 Оценки")
         ups = sum(1 for v in st.session_state.feedback.values() if v == 1)
         downs = sum(1 for v in st.session_state.feedback.values() if v == 0)
         total = ups + downs
-        st.markdown(f"👍 **{ups}** · 👎 **{downs}**")
+
+        st.markdown(
+            f'<div style="font-size:1.2rem; margin-bottom:0.4rem;">'
+            f'<span style="color:#22c55e; font-weight:700;">👍 {ups}</span>'
+            f'<span style="color:#888;"> &nbsp;·&nbsp; </span>'
+            f'<span style="color:#ef4444; font-weight:700;">👎 {downs}</span>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+
         if total > 0:
             quality = round(ups / total * 100)
-            st.caption(f"Качество: **{quality}%** из {total} оценок")
+            if quality >= 70:
+                q_color = "#22c55e"
+            elif quality >= 40:
+                q_color = "#f59e0b"
+            else:
+                q_color = "#ef4444"
+            st.markdown(
+                f'<div style="font-size:0.85rem; opacity:0.8;">'
+                f'Качество: <span style="color:{q_color}; font-weight:700;">{quality}%</span> '
+                f'из {total} оценок'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+
         if st.button("♻️ Сбросить оценки", key="reset_feedback_btn", use_container_width=True):
             st.session_state.feedback = {}
             st.rerun()
@@ -629,10 +709,8 @@ if ask_clicked and user_input_text.strip():
     user_input = user_input_text.strip()
 
 if user_input:
-    # ✅ Стираем прошлый ответ — режим "один ответ на экране"
     st.session_state.messages = []
 
-    # Подсказка для коротких вопросов про допуски
     if re.search(r'допуск|отклонени', user_input, re.IGNORECASE) and len(user_input.split()) < 4:
         st.info(
             "💡 Уточните: допуски на что?\n\n"
@@ -650,7 +728,6 @@ if user_input:
 
     with st.spinner("⏳ Ищу ответ в документах…"):
         try:
-            # ✅ НОВОЕ: расширенный поиск при "Попробовать снова"
             current_question = user_input
             if st.session_state.expanded_search:
                 current_question = user_input + " допуски отклонения таблица приложение"
@@ -719,10 +796,9 @@ with chat_container:
                     with st.popover("📋 Копировать", use_container_width=True):
                         st.code(msg["content"], language="markdown")
 
-                # ✅ НОВОЕ: активные оценки — не сбрасываются, логируются
+                # ✅ Оценки: логируются, не сбрасываются
                 with action_cols[2]:
                     fb = st.feedback("thumbs", key=f"fb_{idx}_{hash(q)}")
-
                     if fb is not None:
                         if st.session_state.feedback.get(q) != fb:
                             st.session_state.feedback[q] = fb
@@ -733,7 +809,7 @@ with chat_container:
                             else:
                                 st.toast("👎 Учтём. Можно нажать «Попробовать снова».")
 
-                # ✅ НОВОЕ: кнопка "Попробовать снова" при 👎
+                # ✅ Кнопка "Попробовать снова" при 👎
                 if st.session_state.feedback.get(q) == 0:
                     if st.button(
                         "🔄 Попробовать снова (расширенный поиск)",
