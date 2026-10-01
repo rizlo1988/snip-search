@@ -29,7 +29,7 @@ HEADER_PATTERNS = [
     re.compile(r'^ГОСТ Р \d+-\d+$'),
     re.compile(r'^ГОСТ \d+-\d+$'),
     re.compile(r'^Применяется с \d+\.\d+\.\d+'),
-    re.compile(r'^\d+$'),  # строки только из числа (номера страниц)
+    re.compile(r'^\d+$'),
     re.compile(r'^ГОСТ Р 51872-2024'),
     re.compile(r'^СП 34\.13330\.2021'),
     re.compile(r'^СП 70\.13330\.2012 Несущие'),
@@ -85,7 +85,6 @@ def looks_like_table_context(lines, i, window=6):
 
 # ==================== ПРОВЕРКА "НАСТОЯЩИЙ ЛИ ЭТО ЗАГОЛОВОК" ====================
 
-# Слова-мусор, которые НЕ могут быть заголовком раздела документа.
 TRASH_TITLE_STARTS = (
     'Отклонение', 'Разность', 'Измерительный', 'То же',
     'Допускаемые', 'Предельные', 'Наименьшие', 'Наибольшие',
@@ -95,8 +94,6 @@ TRASH_TITLE_STARTS = (
     'До ', 'От ', 'Свыше', 'Менее', 'Более',
 )
 
-# ✅ НОВОЕ: конкретные фразы, которые НЕ являются заголовками разделов.
-# Это строки таблиц, которые парсер иногда принимает за заголовки.
 BAD_CHAPTER_TITLE_PREFIXES = (
     'Допускаемое соединение',
     'Допускаемые соединения',
@@ -117,41 +114,29 @@ BAD_CHAPTER_TITLE_PREFIXES = (
 
 
 def is_plausible_chapter_title(title):
-    """Проверяет, может ли строка быть заголовком раздела документа.
-
-    Отсеивает строки из таблиц, которые часто выглядят как заголовки.
-    """
     title = title.strip()
 
-    # Слишком короткий или слишком длинный — не заголовок
     if len(title) < 5 or len(title) > 120:
         return False
 
-    # Начинается с мусорного слова (строки таблицы)
     for trash in TRASH_TITLE_STARTS:
         if title.startswith(trash):
             return False
 
-    # ✅ НОВОЕ: не может быть заголовком раздела, если начинается
-    # с известной мусорной фразы
     for prefix in BAD_CHAPTER_TITLE_PREFIXES:
         if title.startswith(prefix):
             return False
 
-    # Содержит единицы измерения в начале — это строка таблицы
     if re.match(r'^\d+\s*(мм|см|м|кг|%|‰|МПа|м/с)', title):
         return False
 
-    # Заголовок должен начинаться с заглавной буквы (кириллица)
     if not re.match(r'^[А-ЯЁ]', title):
         return False
 
-    # Слишком много цифр — это скорее всего строка таблицы
     digits = sum(c.isdigit() for c in title)
     if digits > len(title) * 0.3:
         return False
 
-    # Заголовок не должен состоять преимущественно из знаков препинания
     letters = sum(c.isalpha() for c in title)
     if letters < len(title) * 0.5:
         return False
@@ -160,21 +145,16 @@ def is_plausible_chapter_title(title):
 
 
 def is_plausible_section_title(title):
-    """Проверяет, может ли строка быть заголовком подраздела."""
     return is_plausible_chapter_title(title)
 
 
 # ==================== СПЕЦИФИЧНЫЕ МУСОРНЫЕ РАЗДЕЛЫ ДЛЯ ДОКУМЕНТОВ ====================
 
-# ✅ НОВОЕ: конкретные заголовки разделов для каждого документа.
-# Если title начинается с одной из этих фраз — это НЕ заголовок раздела.
 BAD_CHAPTERS_BY_DOC = {
     'НЕСУЩИЕ И ОГРАЖДАЮЩИЕ': {
         '4', '5', '6', '7', '8', '13', '14',
         '20', '26', '30', '35', '37',
     },
-    # ✅ НОВОЕ: для СП 46 под номерами 4, 6, 9, 13, 20, 26, 30 могут быть
-    # строки таблиц, ошибочно принятые за разделы
     'МОСТЫ И ТРУБЫ': {
         '4', '6', '9', '13', '20', '26', '30', '35', '37',
     },
@@ -182,15 +162,12 @@ BAD_CHAPTERS_BY_DOC = {
 
 
 def is_bad_chapter_for_doc(chapter_num, title, source):
-    """Проверяет, является ли раздел мусорным для конкретного документа."""
     title_stripped = title.strip()
     for doc_key, bad_chapters in BAD_CHAPTERS_BY_DOC.items():
         if doc_key in source and chapter_num in bad_chapters:
-            # Если заголовок начинается с известной мусорной фразы — это мусор
             for prefix in BAD_CHAPTER_TITLE_PREFIXES:
                 if title_stripped.startswith(prefix):
                     return True
-            # Если заголовок короткий и содержит "мм" — это строка таблицы
             if re.search(r'\bмм\b', title_stripped) and len(title_stripped) < 80:
                 return True
     return False
@@ -208,11 +185,11 @@ def parse_document(text, filename):
     lines = text.split('\n')
     total_lines = len(lines)
 
-    # Регулярки для распознавания структуры
     chapter_full_re = re.compile(r'^(\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{4,100})$')
     chapter_number_only_re = re.compile(r'^(\d{1,2})$')
     section_re = re.compile(r'^(\d{1,2}\.\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{4,100})$')
-    point_re = re.compile(r'^(\d{1,2}(?:\.\d{1,2}){1,3})\s+')
+    # ✅ ФИКС: пункт без обязательного пробела после номера — ловим "9.78 Блоки" и "9.78.Блоки"
+    point_re = re.compile(r'^(\d{1,2}(?:\.\d{1,2}){1,3})[\s\.]+')
     table_re = re.compile(r'^Таблица\s+([А-ЯA-Z]?\.?\d+(?:\.\d+)?[а-яa-z]?)')
     appendix_re = re.compile(r'^Приложение\s+([А-ЯA-Z])')
     title_re = re.compile(r'^[А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{4,100}$')
@@ -274,6 +251,10 @@ def parse_document(text, filename):
             flush_buffer(i)
             table_lines = [line]
             table_num = table_match.group(1)
+            # ✅ ФИКС: сохраняем chapter/point для таблицы
+            saved_chapter = current_chapter
+            saved_chapter_title = current_chapter_title
+            saved_point = current_point
             j = i + 1
             empty_count = 0
             while j < total_lines:
@@ -300,6 +281,10 @@ def parse_document(text, filename):
                 j += 1
 
             table_text = '\n'.join(table_lines).strip()
+            # ✅ ФИКС: для таблиц сохраняем контекст раздела, в котором таблица встречена
+            current_chapter = saved_chapter
+            current_chapter_title = saved_chapter_title
+            current_point = saved_point
             add_chunk(table_text, is_table=True, table_num=table_num)
             i = j
             current_start_line = i
@@ -347,13 +332,11 @@ def parse_document(text, filename):
         if section_match and not in_table_context and not in_appendix:
             title = section_match.group(2).strip()
             if is_plausible_section_title(title):
-                # ✅ НОВОЕ: если номер подраздела не начинается с текущего раздела —
-                # обновляем раздел по первой части номера (например, "14.6" → раздел 14)
                 section_num = section_match.group(1)
                 section_chapter = section_num.split('.')[0]
                 if current_chapter != section_chapter:
                     current_chapter = section_chapter
-                    current_chapter_title = ""  # сбросим — найдём настоящий заголовок позже
+                    current_chapter_title = ""
                 flush_buffer(i)
                 current_section = section_num
                 current_section_title = title
@@ -364,8 +347,24 @@ def parse_document(text, filename):
         # 5. Пункт
         point_match = point_re.match(stripped)
         if point_match and not is_excluded and not in_table_context and not in_appendix:
+            new_point = point_match.group(1)
+            # ✅ ФИКС: защита от фантомных пунктов.
+            # Если номер пункта начинается с числа, которое не соответствует
+            # текущему разделу (например, "7.3.7" в разделе "7",
+            # но реальный раздел 9 или 12) — не присваиваем.
+            point_chapter = new_point.split('.')[0]
+            if current_chapter and current_chapter.isdigit():
+                if point_chapter != current_chapter:
+                    # номер пункта не совпадает с текущим разделом — пропускаем
+                    # как пункт, добавляем в buffer как обычную строку
+                    if current_buffer or current_point:
+                        current_buffer.append(line)
+                    else:
+                        current_buffer.append(line)
+                    i += 1
+                    continue
             flush_buffer(i)
-            current_point = point_match.group(1)
+            current_point = new_point
             current_buffer.append(line)
             i += 1
             continue
@@ -383,7 +382,6 @@ def parse_document(text, filename):
             i += 1
             continue
 
-        # Выход из приложения
         if in_appendix and chapter_full_re.match(stripped) and not in_table_context:
             in_appendix = False
 

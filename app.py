@@ -272,6 +272,7 @@ def is_trash_fragment(c, is_definition_question=False):
     ch_title = c.get('chapter_title', '')
     source = c.get('source', '')
     text = c.get('text', '') or ''
+    point = c.get('point', '')
 
     if not is_definition_question and ch == '3':
         return True
@@ -286,6 +287,15 @@ def is_trash_fragment(c, is_definition_question=False):
     if ch.isdigit() and int(ch) > 30:
         return True
 
+    # ✅ ФИКС: фантомные пункты СП 46.
+    # В СП 46 раздел 7 — «Арматурные и бетонные работы».
+    # Пункт 7.3.7 в реальности про сварку арматуры.
+    # Если фрагмент помечен как раздел 7 СП 46, но содержит текст
+    # про трубы/засыпку/земляные — это фантом парсера.
+    if 'МОСТЫ И ТРУБЫ' in source and ch == '7' and point.startswith('7.'):
+        if re.search(r'труб|засыпк|уплотнени[ея] грунта|землян|отсыпк', text, re.IGNORECASE):
+            return True
+
     for doc_key, bad_chapters in BAD_CHAPTERS_BY_DOC.items():
         if doc_key in source and ch in bad_chapters:
             title_stripped = ch_title.strip()
@@ -294,19 +304,17 @@ def is_trash_fragment(c, is_definition_question=False):
             if re.search(r'\bмм\b', title_stripped) and len(title_stripped) < 80:
                 return True
 
-    # ✅ ФИКС 4: Приложение без конкретной таблицы и без чисел — мусор
     if ch.startswith('Приложение'):
         if not c.get('table_number'):
             if not re.search(r'[±]|\d+\s*мм|\d+,\d+', text):
                 return True
-        # Общие фразы типа "Основные положения, допуски, отклонения и посадки"
         if len(text) < 200 and not re.search(r'[±]|\d+\s*мм|\d+,\d+', text):
             return True
 
     return False
 
 
-# ✅ ФИКС 3: ужесточён has_keyword_match для pipe-вопросов
+# ✅ ФИКС: ужесточён has_keyword_match для pipe-вопросов
 def has_keyword_match(c, question):
     stop_words = {
         'какие', 'какой', 'какая', 'что', 'где', 'когда', 'сколько',
@@ -324,21 +332,30 @@ def has_keyword_match(c, question):
     ]
 
     text_lower = (c.get('text') or '').lower()
+    source = c.get('source', '')
 
-    # ✅ ФИКС 3: жёсткое правило для водопропускных труб
+    # ✅ ФИКС: жёсткое правило для водопропускных труб
     if re.search(r'водопропускн', question, re.IGNORECASE):
+        # Обязательно должно быть про трубу/сооружение
         has_pipe = (
             'водопропускн' in text_lower
             or 'звен' in text_lower
             or 'оголов' in text_lower
+            or 'мгт' in text_lower
         )
         if not has_pipe:
             return False
+        # И должно быть про отметки/допуски/монтаж/засыпку
         has_target = any(w in text_lower for w in [
             'отметк', 'допуск', 'отклонен', 'мм', 'строительн',
-            'монтаж', 'положени', 'засыпк', 'сооружени'
+            'монтаж', 'положени', 'засыпк', 'сооружени', 'профил'
         ])
-        return has_target
+        if not has_target:
+            return False
+        # И это должен быть СП 46 «Мосты и трубы» (или ГОСТ по исполнительной геодезии)
+        if 'МОСТЫ И ТРУБЫ' in source or '51872' in source:
+            return True
+        return False
 
     if not words:
         return True
@@ -363,7 +380,6 @@ def search_and_answer(question, selected_sources):
         question, re.IGNORECASE
     ))
 
-    # ✅ ФИКС 2: сужен is_pipe_question — убрано голое "труб[аыу]?\b"
     is_pipe_question = bool(re.search(
         r'водопропускн'
         r'|звен(?:о|а|ья|ьев|ом|у)?\s+труб'
@@ -430,8 +446,46 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-    # ✅ Жёсткий поиск по фразе "водопропускн" — приоритетно
+    # ✅ ФИКС: жёсткий поиск по метаданным для водопропускных труб
     if is_pipe_question:
+        # 2.1 — Поиск по точным номерам пунктов и таблиц СП 46
+        pipe_specific = [
+            ('point', '9.78'),
+            ('point', '9.81'),
+            ('point', '9.83'),
+            ('point', '4.7'),
+            ('point', '12.7'),
+            ('point', '12.13'),
+            ('table_number', '13'),
+            ('table_number', '28'),
+        ]
+        for key, val in pipe_specific:
+            try:
+                q = collection.get(
+                    where={key: val},
+                    limit=10
+                )
+                if q['documents']:
+                    for i, doc in enumerate(q['documents']):
+                        meta = q['metadatas'][i]
+                        if selected_sources and meta.get('source') not in selected_sources:
+                            continue
+                        candidates.append({
+                            'text': doc,
+                            'source': meta.get('source', ''),
+                            'chapter': meta.get('chapter', ''),
+                            'chapter_title': meta.get('chapter_title', ''),
+                            'section': meta.get('section', ''),
+                            'section_title': meta.get('section_title', ''),
+                            'point': meta.get('point', ''),
+                            'is_table': meta.get('is_table', False),
+                            'table_number': meta.get('table_number', ''),
+                            'type': f'точный {key}={val}'
+                        })
+            except Exception:
+                pass
+
+        # 2.2 — Поиск по маркерам текста (страховка, если метаданные не проставлены)
         pipe_markers = [
             "водопропускн",
             "звеньев труб",
@@ -596,7 +650,7 @@ def search_and_answer(question, selected_sources):
         except Exception:
             pass
 
-    # ✅ Дедупликация по полному хешу
+    # Дедупликация по полному хешу
     seen = set()
     unique_candidates = []
     for c in candidates:
@@ -610,32 +664,38 @@ def search_and_answer(question, selected_sources):
     if not filtered:
         filtered = unique_candidates
 
-    # ✅ Строгий постфильтр
+    # Строгий постфильтр
     keyword_filtered = [c for c in filtered if has_keyword_match(c, question)]
     if len(keyword_filtered) >= 3:
         filtered = keyword_filtered
 
-    # ✅ ФИКС 1: исправлен sort_key (инвертированы значения приоритетов)
+    # ✅ ФИКС: sort_key с приоритетом СП 46 + точных метаданных для труб
     def sort_key(c):
-        # Приоритет 1: если вопрос про трубы и это СП 46 — топ (2 — лучший)
+        # Приоритет 1: для pipe-вопроса — СП 46 «Мосты и трубы»
         if is_pipe_question and 'МОСТЫ И ТРУБЫ' in c.get('source', ''):
             pipe_priority = 2
         elif is_pipe_question:
             pipe_priority = 0
         else:
             pipe_priority = 1
-        # Приоритет 2: Таблица А.1
+
+        # Приоритет 2: точное попадание по метаданным (point 9.78/9.81/9.83, table 13/28)
+        is_exact = 1 if c.get('type', '').startswith('точный') else 0
+
+        # Приоритет 3: Таблица А.1
         table_a1 = 1 if 'Таблица А.1' in c.get('type', '') else 0
-        # Приоритет 3: таблицы
+
+        # Приоритет 4: таблицы
         is_tbl = 1 if c.get('is_table') else 0
-        # Приоритет 4: не мусорные главы
+
+        # Приоритет 5: не мусорные главы
         not_trash = 1 if c.get('chapter') not in ('', '3', '1', '2') else 0
-        # Приоритет 5: длина текста (больше — лучше)
-        return (pipe_priority, table_a1, is_tbl, not_trash, len(c['text']))
+
+        return (pipe_priority, is_exact, table_a1, is_tbl, not_trash, len(c['text']))
 
     filtered.sort(key=sort_key, reverse=True)
 
-    # ✅ ФИКС 5: 10 фрагментов
+    # 10 фрагментов
     unique_filtered = filtered[:10]
 
     context_parts = []
@@ -667,7 +727,7 @@ def search_and_answer(question, selected_sources):
 
     context = "".join(context_parts)
 
-    # ✅ ФИКС 5: промпт — не цитировать общие фразы
+    # ✅ ФИКС: промпт с явной подсказкой про Таблицу 13 и п. 9.78/9.81
     prompt = f"""Ты — эксперт по строительным нормам и правилам (СП, СНиП, ГОСТ).
 
 ВАЖНЫЕ ПРАВИЛА:
@@ -701,6 +761,19 @@ def search_and_answer(question, selected_sources):
 - Если в найденных фрагментах нет какого-то вида допусков — честно скажи,
   каких именно допусков нет.
 
+ЕСЛИ ВОПРОС ПРО ВОДОПРОПУСКНЫЕ ТРУБЫ:
+- Допуски на положение смонтированных элементов труб — в СП 46.13330.2012,
+  Таблица 13 (уступы в рядах фундаментных блоков ≤10 мм, зазоры между
+  секциями и звеньями ±5 мм, продольная ось трубы в профиле и плане −30 мм).
+- Монтаж блоков фундамента под трубы — п. 9.78 (установка на основание
+  с проектным уклоном и заданным строительным подъёмом).
+- Монтаж звеньев труб — п. 9.81.
+- Приёмка трубы до засыпки — п. 9.83.
+- Толщина слоя грунта над трубой при переезде — п. 12.7.
+- Минимальная засыпка для пропуска паводковых вод — Таблица 28.
+- Контроль положения звеньев через 2-3 мес после засыпки — п. 4.7.
+Ищи в первую очередь эти пункты и таблицы.
+
 ФОРМАТ ОТВЕТА (для каждого требования):
 - **Документ:** полное название
 - **Раздел:** номер и название
@@ -717,7 +790,7 @@ def search_and_answer(question, selected_sources):
 
 ОТВЕТ:"""
 
-    # ✅ 429: retry с задержкой
+    # 429: retry с задержкой
     max_retries = 3
     response = None
     last_error = None
