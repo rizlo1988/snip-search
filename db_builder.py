@@ -83,6 +83,31 @@ def looks_like_table_context(lines, i, window=6):
     return number_ratio > 0.5 or (has_units and has_columns)
 
 
+# ==================== ШАПКА ТАБЛИЦЫ ====================
+
+# ✅ ФИКС: шапки таблиц, которые не несут данных
+TABLE_HEADER_PATTERNS = [
+    re.compile(r'^Технические требования\s+Контроль\s+Способ контроля', re.IGNORECASE),
+    re.compile(r'^Технические требования\s+Контроль\s+Метод', re.IGNORECASE),
+    re.compile(r'^Допускаемые отклонения\s+Контроль\s+Способ', re.IGNORECASE),
+    re.compile(r'^Наименование\s+Контроль', re.IGNORECASE),
+    re.compile(r'^\s*Технические требования\s*$', re.IGNORECASE),
+    re.compile(r'^\s*Контроль\s+Способ\s+контроля\s*$', re.IGNORECASE),
+    re.compile(r'^\s*Контроль\s+Метод или способ\s*$', re.IGNORECASE),
+    re.compile(r'^\s*Значения технических требований', re.IGNORECASE),
+]
+
+
+def is_table_header_line(line):
+    stripped = line.strip()
+    if not stripped:
+        return False
+    for pattern in TABLE_HEADER_PATTERNS:
+        if pattern.search(stripped):
+            return True
+    return False
+
+
 # ==================== ПРОВЕРКА "НАСТОЯЩИЙ ЛИ ЭТО ЗАГОЛОВОК" ====================
 
 TRASH_TITLE_STARTS = (
@@ -188,7 +213,6 @@ def parse_document(text, filename):
     chapter_full_re = re.compile(r'^(\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{4,100})$')
     chapter_number_only_re = re.compile(r'^(\d{1,2})$')
     section_re = re.compile(r'^(\d{1,2}\.\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{4,100})$')
-    # ✅ ФИКС: пункт без обязательного пробела после номера — ловим "9.78 Блоки" и "9.78.Блоки"
     point_re = re.compile(r'^(\d{1,2}(?:\.\d{1,2}){1,3})[\s\.]+')
     table_re = re.compile(r'^Таблица\s+([А-ЯA-Z]?\.?\d+(?:\.\d+)?[а-яa-z]?)')
     appendix_re = re.compile(r'^Приложение\s+([А-ЯA-Z])')
@@ -251,39 +275,67 @@ def parse_document(text, filename):
             flush_buffer(i)
             table_lines = [line]
             table_num = table_match.group(1)
-            # ✅ ФИКС: сохраняем chapter/point для таблицы
+            # ✅ Сохраняем контекст раздела/пункта для таблицы
             saved_chapter = current_chapter
             saved_chapter_title = current_chapter_title
+            saved_section = current_section
+            saved_section_title = current_section_title
             saved_point = current_point
+
             j = i + 1
             empty_count = 0
+            header_skipped = 0  # ✅ сколько шапок пропущено
             while j < total_lines:
                 next_line = lines[j]
                 next_stripped = next_line.strip()
 
+                # Новая таблица — стоп
                 if table_re.match(next_stripped):
                     break
-                if re.match(r'^\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\s+[А-ЯЁ]', next_stripped) and not in_appendix:
+
+                # ✅ ФИКС: НЕ прерываем по chapter_full_re — таблица
+                # не должна обрываться на строке, похожей на заголовок.
+                # Прерываем только по section_re / point_re, которые
+                # гарантированно начинают новый пункт ДОКУМЕНТА, а не
+                # строку таблицы.
+                # Проверяем только если следующая строка явно похожа на
+                # заголовок раздела И не содержит разделителей-колонок.
+
+                if (re.match(r'^\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\s+[А-ЯЁ]', next_stripped)
+                        and not re.search(r'\s{3,}', next_stripped)  # не таблица
+                        and not in_appendix):
                     break
-                if chapter_full_re.match(next_stripped) and not in_appendix:
+
+                if (chapter_full_re.match(next_stripped)
+                        and not re.search(r'\s{3,}', next_stripped)  # не таблица
+                        and not in_appendix):
                     break
 
                 if not next_stripped:
                     empty_count += 1
-                    if empty_count >= 3:
+                    if empty_count >= 5:  # ✅ ФИКС: было 3
                         break
                     table_lines.append(next_line)
                 else:
                     empty_count = 0
+                    # ✅ ФИКС: пропускаем шапки таблиц
+                    if is_table_header_line(next_stripped):
+                        header_skipped += 1
+                        # Не добавляем в table_lines — это шапка
+                        j += 1
+                        continue
                     table_lines.append(next_line)
-                    if len(table_lines) > 200:
+                    # ✅ ФИКС: лимит поднят с 200 до 400
+                    if len(table_lines) > 400:
                         break
                 j += 1
 
             table_text = '\n'.join(table_lines).strip()
-            # ✅ ФИКС: для таблиц сохраняем контекст раздела, в котором таблица встречена
+            # Восстанавливаем контекст
             current_chapter = saved_chapter
             current_chapter_title = saved_chapter_title
+            current_section = saved_section
+            current_section_title = saved_section_title
             current_point = saved_point
             add_chunk(table_text, is_table=True, table_num=table_num)
             i = j
@@ -348,15 +400,10 @@ def parse_document(text, filename):
         point_match = point_re.match(stripped)
         if point_match and not is_excluded and not in_table_context and not in_appendix:
             new_point = point_match.group(1)
-            # ✅ ФИКС: защита от фантомных пунктов.
-            # Если номер пункта начинается с числа, которое не соответствует
-            # текущему разделу (например, "7.3.7" в разделе "7",
-            # но реальный раздел 9 или 12) — не присваиваем.
             point_chapter = new_point.split('.')[0]
+            # ✅ Защита от фантомных пунктов
             if current_chapter and current_chapter.isdigit():
                 if point_chapter != current_chapter:
-                    # номер пункта не совпадает с текущим разделом — пропускаем
-                    # как пункт, добавляем в buffer как обычную строку
                     if current_buffer or current_point:
                         current_buffer.append(line)
                     else:
