@@ -19,6 +19,42 @@ st.set_page_config(
     initial_sidebar_state="auto"
 )
 
+
+# ==================== ЛОГИРОВАНИЕ ОЦЕНОК ====================
+# Опционально: сюда можно вставить URL Google Apps Script Web App,
+# и оценки будут уходить в таблицу. Пока — пишем в консоль Streamlit.
+
+FEEDBACK_WEBHOOK_URL = ""  # ← вставьте сюда URL из Apps Script, если нужно
+
+
+def log_feedback(question, answer, rating, fragments_count=0):
+    """Сохраняет оценку. Если задан webhook — отправляет POST."""
+    payload = {
+        "timestamp": datetime.now().isoformat(),
+        "question": question,
+        "answer": (answer or "")[:500],
+        "rating": int(rating),
+        "fragments_count": fragments_count,
+    }
+
+    # Всегда пишем в консоль (видно в Streamlit Cloud → Logs)
+    print(f"[FEEDBACK] {payload}")
+
+    if FEEDBACK_WEBHOOK_URL:
+        try:
+            import urllib.request
+            import json as _json
+            req = urllib.request.Request(
+                FEEDBACK_WEBHOOK_URL,
+                data=_json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=5)
+        except Exception as e:
+            print(f"[FEEDBACK] webhook error: {e}")
+
+
 st.markdown("""
 <style>
     .stApp { background: var(--background-color); }
@@ -134,8 +170,6 @@ TRASH_TITLE_PATTERNS = [
 ]
 
 # ✅ ФИКС D: специфичные "мусорные" разделы для конкретных документов.
-# В СП 70 под номерами 4, 5, 13, 20, 26 и т.д. идут СТРОКИ ТАБЛИЦ,
-# которые парсер ошибочно принял за разделы документа.
 BAD_CHAPTERS_BY_DOC = {
     'НЕСУЩИЕ И ОГРАЖДАЮЩИЕ': {
         '4', '5', '6', '7', '8', '13', '14',
@@ -176,7 +210,6 @@ def is_trash_fragment(c, is_definition_question=False):
             title_stripped = ch_title.strip()
             if title_stripped.startswith(BAD_TITLE_PREFIXES):
                 return True
-            # Дополнительно: если заголовок короткий и содержит "мм" — это строка таблицы
             if re.search(r'\bмм\b', title_stripped) and len(title_stripped) < 80:
                 return True
 
@@ -359,7 +392,7 @@ def search_and_answer(question, selected_sources):
         except Exception:
             pass
 
-    # ✅ ФИКС E: дедупликация по полному хешу текста (было c['text'][:200])
+    # ✅ ФИКС E: дедупликация по полному хешу текста
     seen = set()
     unique_candidates = []
     for c in candidates:
@@ -375,13 +408,9 @@ def search_and_answer(question, selected_sources):
 
     # ✅ СОРТИРОВКА С ПРИОРИТЕТОМ ДЛЯ ТАБЛИЦЫ А.1
     filtered.sort(key=lambda c: (
-        # Приоритет 1: Таблица А.1 — ВСЕГДА выше всех
         0 if 'Таблица А.1' in c.get('type', '') else 1,
-        # Приоритет 2: таблицы
         0 if c.get('is_table') else 1,
-        # Приоритет 3: не мусор
         1 if c.get('chapter') not in ('', '3', '1', '2') else 0,
-        # Приоритет 4: длинные
         len(c['text'])
     ), reverse=True)
 
@@ -416,8 +445,7 @@ def search_and_answer(question, selected_sources):
 
     context = "".join(context_parts)
 
-    # ✅ ФИКС C: добавлены пункты 4-6 (ограничение вывода, запрет дублей,
-    #           защита от строк таблиц, замаскированных под "разделы")
+    # ✅ ФИКС C: ограничение вывода + защита от строк таблиц
     prompt = f"""Ты — эксперт по строительным нормам и правилам (СП, СНиП, ГОСТ).
 
 ВАЖНЫЕ ПРАВИЛА:
@@ -484,6 +512,11 @@ if "pending_question" not in st.session_state:
     st.session_state.pending_question = ""
 if "input_version" not in st.session_state:
     st.session_state.input_version = 0
+# ✅ НОВОЕ: флаги для активных оценок
+if "retry_question" not in st.session_state:
+    st.session_state.retry_question = None
+if "expanded_search" not in st.session_state:
+    st.session_state.expanded_search = False
 
 
 # ==================== САЙДБАР ====================
@@ -532,6 +565,8 @@ with st.sidebar:
         st.session_state.history = []
         st.session_state.feedback = {}
         st.session_state.pending_question = ""
+        st.session_state.retry_question = None
+        st.session_state.expanded_search = False
         st.session_state.input_version += 1
         st.rerun()
 
@@ -545,12 +580,20 @@ with st.sidebar:
                 st.session_state.input_version += 1
                 st.rerun()
 
+    # ✅ НОВОЕ: счётчик оценок с % качества и сбросом
     if st.session_state.feedback:
         st.markdown("---")
         st.markdown("### 📊 Оценки")
         ups = sum(1 for v in st.session_state.feedback.values() if v == 1)
         downs = sum(1 for v in st.session_state.feedback.values() if v == 0)
+        total = ups + downs
         st.markdown(f"👍 **{ups}** · 👎 **{downs}**")
+        if total > 0:
+            quality = round(ups / total * 100)
+            st.caption(f"Качество: **{quality}%** из {total} оценок")
+        if st.button("♻️ Сбросить оценки", key="reset_feedback_btn", use_container_width=True):
+            st.session_state.feedback = {}
+            st.rerun()
 
 
 # ==================== ЗАГОЛОВОК ====================
@@ -580,16 +623,13 @@ with st.form("question_form", clear_on_submit=False):
 
 
 # ==================== ОБРАБОТКА ВОПРОСА ====================
-# ✅ ФИКС: режим "один ответ на экране".
-#    При новом вопросе прошлый ответ СТИРАЕТСЯ из чата.
-#    История вопросов в сайдбаре сохраняется.
 
 user_input = None
 if ask_clicked and user_input_text.strip():
     user_input = user_input_text.strip()
 
 if user_input:
-    # ✅ ГЛАВНОЕ: стираем прошлый ответ — оставляем только новый вопрос
+    # ✅ Стираем прошлый ответ — режим "один ответ на экране"
     st.session_state.messages = []
 
     # Подсказка для коротких вопросов про допуски
@@ -603,16 +643,20 @@ if user_input:
             "- «допуски на ровность»"
         )
 
-    # Добавляем только текущий вопрос
     st.session_state.messages.append({"role": "user", "content": user_input})
 
-    # История вопросов — накапливается отдельно
     if user_input not in st.session_state.history:
         st.session_state.history.append(user_input)
 
     with st.spinner("⏳ Ищу ответ в документах…"):
         try:
-            answer, sources, fragments = search_and_answer(user_input, selected_sources)
+            # ✅ НОВОЕ: расширенный поиск при "Попробовать снова"
+            current_question = user_input
+            if st.session_state.expanded_search:
+                current_question = user_input + " допуски отклонения таблица приложение"
+                st.session_state.expanded_search = False
+
+            answer, sources, fragments = search_and_answer(current_question, selected_sources)
 
             st.session_state.messages.append({
                 "role": "assistant",
@@ -675,14 +719,31 @@ with chat_container:
                     with st.popover("📋 Копировать", use_container_width=True):
                         st.code(msg["content"], language="markdown")
 
+                # ✅ НОВОЕ: активные оценки — не сбрасываются, логируются
                 with action_cols[2]:
-                    fb = st.feedback("thumbs", key=f"fb_{idx}")
+                    fb = st.feedback("thumbs", key=f"fb_{idx}_{hash(q)}")
+
                     if fb is not None:
-                        st.session_state.feedback[q] = fb
-                        if fb == 1:
-                            st.toast("👍 Спасибо!")
-                        else:
-                            st.toast("👎 Учтём")
+                        if st.session_state.feedback.get(q) != fb:
+                            st.session_state.feedback[q] = fb
+                            log_feedback(q, msg["content"], fb, len(fragments))
+
+                            if fb == 1:
+                                st.toast("👍 Спасибо! Учли.")
+                            else:
+                                st.toast("👎 Учтём. Можно нажать «Попробовать снова».")
+
+                # ✅ НОВОЕ: кнопка "Попробовать снова" при 👎
+                if st.session_state.feedback.get(q) == 0:
+                    if st.button(
+                        "🔄 Попробовать снова (расширенный поиск)",
+                        key=f"retry_{idx}_{hash(q)}",
+                        use_container_width=True,
+                    ):
+                        st.session_state.pending_question = q
+                        st.session_state.expanded_search = True
+                        st.session_state.input_version += 1
+                        st.rerun()
 
                 if sources:
                     with st.expander(f"📚 Источники ({len(sources)})", expanded=False):
