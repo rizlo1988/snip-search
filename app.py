@@ -3,6 +3,7 @@ import chromadb
 from openai import OpenAI
 import re
 import os
+import time
 from datetime import datetime
 from db_builder import build_database, DB_PATH, COLLECTION_NAME
 
@@ -134,7 +135,6 @@ st.markdown("""
         .stExpander summary { font-size: 0.9rem !important; }
         .db-status { font-size: 0.8rem; padding: 0.4rem 0.6rem; }
 
-        /* ✅ Уменьшенные часы на мобильных */
         .top-clock {
             top: 6px;
             left: 8px;
@@ -161,11 +161,9 @@ components.html("""
 (function() {
     const parentDoc = window.parent.document;
 
-    // Удаляем старые часы, если перерендерилось
     const old = parentDoc.querySelector('.top-clock');
     if (old) old.remove();
 
-    // Создаём контейнер
     const clock = parentDoc.createElement('div');
     clock.className = 'top-clock';
     clock.innerHTML = '<span class="clock-date"></span><span class="clock-time"></span>';
@@ -256,6 +254,9 @@ BAD_CHAPTERS_BY_DOC = {
         '4', '5', '6', '7', '8', '13', '14',
         '20', '26', '30', '35', '37',
     },
+    'МОСТЫ И ТРУБЫ': {
+        '4', '6', '9', '13', '20', '26', '30', '35', '37',
+    },
 }
 
 BAD_TITLE_PREFIXES = (
@@ -263,6 +264,12 @@ BAD_TITLE_PREFIXES = (
     'Разность',
     'Измерительный',
     'То же',
+    'Допускаемое соединение',
+    'Допускаемые соединения',
+    'Устройство асфальтобетонного покрытия',
+    'Инъецирование закрытых каналов',
+    'Нормальное прохождение',
+    'Операцию по выпуску',
 )
 
 
@@ -273,11 +280,14 @@ def is_trash_fragment(c, is_definition_question=False):
 
     if not is_definition_question and ch == '3':
         return True
+
     if ch in TRASH_CHAPTERS:
         return True
+
     for p in TRASH_TITLE_PATTERNS:
         if p.search(ch_title):
             return True
+
     if ch.isdigit() and int(ch) > 30:
         return True
 
@@ -290,6 +300,26 @@ def is_trash_fragment(c, is_definition_question=False):
                 return True
 
     return False
+
+
+def has_keyword_match(c, question):
+    stop_words = {
+        'какие', 'какой', 'какая', 'что', 'где', 'когда', 'сколько',
+        'между', 'также', 'или', 'для', 'при', 'над', 'под', 'без',
+        'более', 'менее', 'это', 'все', 'его', 'её', 'их', 'мне',
+        'нужно', 'надо', 'должен', 'должна', 'можно', 'есть',
+    }
+
+    words = [
+        w.lower() for w in re.findall(r'[а-яёa-z]{5,}', question.lower())
+        if w.lower() not in stop_words
+    ]
+
+    if not words:
+        return True
+
+    text_lower = (c.get('text') or '').lower()
+    return any(w in text_lower for w in words)
 
 
 def search_and_answer(question, selected_sources):
@@ -365,7 +395,10 @@ def search_and_answer(question, selected_sources):
     if re.search(
         r'допуск|отклонени|отметк|ширин|уклон|ровност|толщин|'
         r'предельн|значени|параметр|размер|погрешн|расстоян|'
-        r'таблиц|приложени',
+        r'таблиц|приложени|'
+        r'труб|водопропускн|оголов|звен|'
+        r'мост|опор|балк|пролетн|сва[ий]|'
+        r'фундамент|арматур|сварк|шов|бетон',
         question, re.IGNORECASE
     ):
         markers = [
@@ -381,6 +414,18 @@ def search_and_answer(question, selected_sources):
             "Ширина слоя",
             "Превышение граней",
             "Прямолинейность",
+            "водопропускн",
+            "трубы",
+            "звень",
+            "оголов",
+            "фундамент труб",
+            "засыпк",
+            "опор мост",
+            "пролетн",
+            "сва[ий]",
+            "арматур",
+            "сварн",
+            "бетонирова",
         ]
 
         for marker in markers:
@@ -478,9 +523,16 @@ def search_and_answer(question, selected_sources):
             unique_candidates.append(c)
 
     filtered = [c for c in unique_candidates if not is_trash_fragment(c, is_definition_question)]
+
     if not filtered:
         filtered = unique_candidates
 
+    # ✅ ФИКС H: строгий постфильтр — оставляем только релевантные
+    keyword_filtered = [c for c in filtered if has_keyword_match(c, question)]
+    if len(keyword_filtered) >= 3:
+        filtered = keyword_filtered
+
+    # ✅ СОРТИРОВКА
     filtered.sort(key=lambda c: (
         0 if 'Таблица А.1' in c.get('type', '') else 1,
         0 if c.get('is_table') else 1,
@@ -488,8 +540,9 @@ def search_and_answer(question, selected_sources):
         len(c['text'])
     ), reverse=True)
 
-    # ✅ ФИКС A: было [:25]
-    unique_filtered = filtered[:12]
+    # ✅ ФИКС A + 429: было [:25], потом [:12] — теперь [:8],
+    # чтобы не упираться в лимит 100 000 токенов/мин
+    unique_filtered = filtered[:8]
 
     context_parts = []
     sources_set = []
@@ -512,19 +565,25 @@ def search_and_answer(question, selected_sources):
         if c.get('table_number'):
             ref_parts.append(f"Таблица {c['table_number']}")
 
+        # ✅ 429: обрезаем длинные фрагменты до 1000 символов
+        chunk_text = c['text'][:1000]
         ref = " · ".join(ref_parts)
-        context_parts.append(f"\n\n--- Источник: {ref} ---\n{c['text']}")
+        context_parts.append(f"\n\n--- Источник: {ref} ---\n{chunk_text}")
         if ref not in sources_set:
             sources_set.append(ref)
 
     context = "".join(context_parts)
 
-    # ✅ ФИКС C: ограничение вывода + защита от строк таблиц
+    # ✅ ФИКС C + I: ограничение вывода + честное "нет ответа"
     prompt = f"""Ты — эксперт по строительным нормам и правилам (СП, СНиП, ГОСТ).
 
 ВАЖНЫЕ ПРАВИЛА:
 1. Отвечай ТОЛЬКО на основе фрагментов ниже. Не выдумывай.
-2. Если во фрагментах нет ответа — честно скажи: «В найденных фрагментах нет полного ответа».
+2. КРИТИЧНО: Если во фрагментах НЕТ информации, напрямую отвечающей
+   на вопрос — ОБЯЗАТЕЛЬНО скажи:
+   «В найденных фрагментах нет полного ответа по теме "<вопрос>".
+    Найдены только косвенные упоминания.»
+   НЕ пересказывай нерелевантные фрагменты как ответ.
 3. Отвечай структурированно, по пунктам.
 4. ВАЖНО: Отвечай МАКСИМУМ 7 пунктами. Выбери ТОЛЬКО самые
    релевантные фрагменты. Не перечисляй всё подряд.
@@ -562,13 +621,29 @@ def search_and_answer(question, selected_sources):
 
 ОТВЕТ:"""
 
-    response = client.chat.completions.create(
-        model="Qwen/Qwen3-30B-A3B",
-        messages=[{"role": "user", "content": prompt}],
-        # ✅ ФИКС B: было 2500
-        max_tokens=3000,
-        extra_body={"enable_thinking": False}
-    )
+    # ✅ 429: retry с задержкой при превышении rate limit
+    max_retries = 3
+    response = None
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model="Qwen/Qwen3-30B-A3B",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=3000,
+                extra_body={"enable_thinking": False}
+            )
+            break
+        except Exception as e:
+            last_error = e
+            err_str = str(e)
+            if '429' in err_str or 'TooManyRequests' in err_str or 'rate limit' in err_str:
+                wait_time = 15 * (attempt + 1)  # 15, 30, 45 сек
+                time.sleep(wait_time)
+            else:
+                raise
+    if response is None and last_error:
+        raise last_error
 
     answer = response.choices[0].message.content
     return answer, sources_set, unique_filtered
@@ -719,6 +794,7 @@ if ask_clicked and user_input_text.strip():
     user_input = user_input_text.strip()
 
 if user_input:
+    # ✅ Стираем прошлый ответ — режим "один ответ на экране"
     st.session_state.messages = []
 
     if re.search(r'допуск|отклонени', user_input, re.IGNORECASE) and len(user_input.split()) < 4:
