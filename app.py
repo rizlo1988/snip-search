@@ -87,32 +87,43 @@ st.markdown("""
     }
     [data-testid="stForm"] { border: none; padding: 0; }
 
-    /* ✅ НОВОЕ: часы в правом верхнем углу */
+    /* ✅ Часы в ЛЕВОМ верхнем углу: дата сверху, время снизу */
     .top-clock {
         position: fixed;
         top: 12px;
-        right: 20px;
+        left: 20px;
         z-index: 999999;
         background: var(--secondary-background-color);
         color: var(--text-color);
-        padding: 6px 14px;
-        border-radius: 8px;
-        font-size: 0.9rem;
-        font-weight: 600;
+        padding: 10px 18px;
+        border-radius: 10px;
         font-family: 'SF Mono', 'Consolas', 'Menlo', monospace;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        box-shadow: 0 2px 10px rgba(0,0,0,0.18);
         border: 1px solid rgba(128,128,128,0.2);
         pointer-events: none;
         white-space: nowrap;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        line-height: 1.2;
     }
-    .top-clock .clock-date { color: var(--text-color); opacity: 0.75; }
-    .top-clock .clock-sep { color: var(--text-color); opacity: 0.4; margin: 0 4px; }
-    .top-clock .clock-time { color: var(--primary-color); }
+    .top-clock .clock-date {
+        font-size: 0.95rem;
+        font-weight: 600;
+        opacity: 0.85;
+        color: var(--text-color);
+    }
+    .top-clock .clock-time {
+        font-size: 1.4rem;
+        font-weight: 700;
+        color: var(--primary-color);
+        letter-spacing: 1px;
+    }
 
     @media (max-width: 768px) {
         .main-header { font-size: 1.3rem !important; line-height: 1.2; margin-bottom: 0.3rem; }
         .main-subheader { font-size: 0.85rem; margin-bottom: 0.75rem; line-height: 1.3; }
-        .block-container { padding-top: 3.5rem !important; padding-bottom: 3rem !important; padding-left: 0.75rem !important; padding-right: 0.75rem !important; }
+        .block-container { padding-top: 4.5rem !important; padding-bottom: 3rem !important; padding-left: 0.75rem !important; padding-right: 0.75rem !important; }
         [data-testid="stSidebar"] { min-width: 0 !important; max-width: 100% !important; }
         [data-testid="stSidebar"] .doc-card { font-size: 0.75rem; padding: 0.4rem 0.6rem; }
         .stButton > button, .stFormSubmitButton > button { font-size: 0.9rem !important; padding: 0.6rem 0.8rem !important; min-height: 2.6rem; }
@@ -123,27 +134,31 @@ st.markdown("""
         .stExpander summary { font-size: 0.9rem !important; }
         .db-status { font-size: 0.8rem; padding: 0.4rem 0.6rem; }
 
-        /* ✅ НОВОЕ: уменьшенные часы на мобильных */
+        /* ✅ Уменьшенные часы на мобильных */
         .top-clock {
             top: 6px;
-            right: 8px;
-            padding: 4px 8px;
+            left: 8px;
+            padding: 6px 10px;
+            border-radius: 8px;
+        }
+        .top-clock .clock-date {
             font-size: 0.7rem;
-            border-radius: 6px;
+        }
+        .top-clock .clock-time {
+            font-size: 1rem;
+            letter-spacing: 0.5px;
         }
     }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ✅ НОВОЕ: инъекция часов в правый верхний угол
-# Используем JS-компонент, чтобы время было локальное (по браузеру пользователя)
+# ✅ Часы в левом верхнем углу (дата сверху, время снизу)
 import streamlit.components.v1 as components
 
 components.html("""
 <script>
 (function() {
-    // Находим родительский документ Streamlit
     const parentDoc = window.parent.document;
 
     // Удаляем старые часы, если перерендерилось
@@ -153,7 +168,7 @@ components.html("""
     // Создаём контейнер
     const clock = parentDoc.createElement('div');
     clock.className = 'top-clock';
-    clock.innerHTML = '<span class="clock-date"></span><span class="clock-sep">·</span><span class="clock-time"></span>';
+    clock.innerHTML = '<span class="clock-date"></span><span class="clock-time"></span>';
     parentDoc.body.appendChild(clock);
 
     const dateEl = clock.querySelector('.clock-date');
@@ -580,11 +595,6 @@ if "expanded_search" not in st.session_state:
 # ==================== САЙДБАР ====================
 
 with st.sidebar:
-    st.markdown(
-        f'<div class="db-status">✅ База собрана · {len(sources_list)} документов</div>',
-        unsafe_allow_html=True
-    )
-
     st.markdown("### 🎯 Фильтр по документам")
     selected_sources = st.multiselect(
         "Искать только в:",
@@ -678,7 +688,7 @@ with st.sidebar:
 
 # ==================== ЗАГОЛОВОК ====================
 
-st.markdown('<h1 class="main-header">📐 Поиск по СНиПам</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header" style="margin-top: 4.5rem;">📐 Поиск по СНиПам</h1>', unsafe_allow_html=True)
 st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
 
 
