@@ -125,16 +125,37 @@ def count_sources():
 sources_list = count_sources()
 
 
+# ==================== ФИЛЬТР МУСОРА ====================
+
 TRASH_CHAPTERS = {'1', '2'}
 TRASH_TITLE_PATTERNS = [
     re.compile(r'Нормативные ссылки', re.IGNORECASE),
     re.compile(r'Область применения', re.IGNORECASE),
 ]
 
+# ✅ ФИКС D: специфичные "мусорные" разделы для конкретных документов.
+# В СП 70 под номерами 4, 5, 13, 20, 26 и т.д. идут СТРОКИ ТАБЛИЦ,
+# которые парсер ошибочно принял за разделы документа.
+BAD_CHAPTERS_BY_DOC = {
+    'НЕСУЩИЕ И ОГРАЖДАЮЩИЕ': {
+        '4', '5', '6', '7', '8', '13', '14',
+        '20', '26', '30', '35', '37',
+    },
+}
+
+# ✅ ФИКС D: заголовки, которые являются строками таблиц, а не разделами
+BAD_TITLE_PREFIXES = (
+    'Отклонение',
+    'Разность',
+    'Измерительный',
+    'То же',
+)
+
 
 def is_trash_fragment(c, is_definition_question=False):
     ch = c.get('chapter', '')
     ch_title = c.get('chapter_title', '')
+    source = c.get('source', '')
 
     if not is_definition_question and ch == '3':
         return True
@@ -148,6 +169,16 @@ def is_trash_fragment(c, is_definition_question=False):
 
     if ch.isdigit() and int(ch) > 30:
         return True
+
+    # ✅ ФИКС D: мусор из таблиц СП 70 (и подобных документов)
+    for doc_key, bad_chapters in BAD_CHAPTERS_BY_DOC.items():
+        if doc_key in source and ch in bad_chapters:
+            title_stripped = ch_title.strip()
+            if title_stripped.startswith(BAD_TITLE_PREFIXES):
+                return True
+            # Дополнительно: если заголовок короткий и содержит "мм" — это строка таблицы
+            if re.search(r'\bмм\b', title_stripped) and len(title_stripped) < 80:
+                return True
 
     return False
 
@@ -328,11 +359,11 @@ def search_and_answer(question, selected_sources):
         except Exception:
             pass
 
-    # Дедупликация
+    # ✅ ФИКС E: дедупликация по полному хешу текста (было c['text'][:200])
     seen = set()
     unique_candidates = []
     for c in candidates:
-        key = c['text'][:200]
+        key = hash(c['text'])
         if key not in seen:
             seen.add(key)
             unique_candidates.append(c)
@@ -354,7 +385,8 @@ def search_and_answer(question, selected_sources):
         len(c['text'])
     ), reverse=True)
 
-    unique_filtered = filtered[:25]
+    # ✅ ФИКС A: было [:25] — Qwen не успевал обработать и обрывался
+    unique_filtered = filtered[:12]
 
     context_parts = []
     sources_set = []
@@ -384,12 +416,21 @@ def search_and_answer(question, selected_sources):
 
     context = "".join(context_parts)
 
+    # ✅ ФИКС C: добавлены пункты 4-6 (ограничение вывода, запрет дублей,
+    #           защита от строк таблиц, замаскированных под "разделы")
     prompt = f"""Ты — эксперт по строительным нормам и правилам (СП, СНиП, ГОСТ).
 
 ВАЖНЫЕ ПРАВИЛА:
 1. Отвечай ТОЛЬКО на основе фрагментов ниже. Не выдумывай.
 2. Если во фрагментах нет ответа — честно скажи: «В найденных фрагментах нет полного ответа».
 3. Отвечай структурированно, по пунктам.
+4. ВАЖНО: Отвечай МАКСИМУМ 7 пунктами. Выбери ТОЛЬКО самые
+   релевантные фрагменты. Не перечисляй всё подряд.
+5. Не дублируй один и тот же фрагмент дважды.
+6. Если фрагмент — это строка таблицы (например, «Отклонение от
+   совмещения ориентиров 5 мм»), а не раздел документа — НЕ оформляй
+   его как «Раздел». Указывай его как строку соответствующей таблицы
+   или пропускай.
 
 ОСОБОЕ ВНИМАНИЕ (если вопрос про допуски/отклонения):
 - Ищи ВСЕ виды допусков, а не только первый попавшийся:
@@ -422,7 +463,8 @@ def search_and_answer(question, selected_sources):
     response = client.chat.completions.create(
         model="Qwen/Qwen3-30B-A3B",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=2500,
+        # ✅ ФИКС B: было 2500 — Qwen обрывался на полуслове
+        max_tokens=3000,
         extra_body={"enable_thinking": False}
     )
 
