@@ -271,6 +271,7 @@ def is_trash_fragment(c, is_definition_question=False):
     ch = c.get('chapter', '')
     ch_title = c.get('chapter_title', '')
     source = c.get('source', '')
+    text = c.get('text', '') or ''
 
     if not is_definition_question and ch == '3':
         return True
@@ -293,18 +294,25 @@ def is_trash_fragment(c, is_definition_question=False):
             if re.search(r'\bмм\b', title_stripped) and len(title_stripped) < 80:
                 return True
 
+    # ✅ ФИКС 4: Приложение без конкретной таблицы и без чисел — мусор
+    if ch.startswith('Приложение'):
+        if not c.get('table_number'):
+            if not re.search(r'[±]|\d+\s*мм|\d+,\d+', text):
+                return True
+        # Общие фразы типа "Основные положения, допуски, отклонения и посадки"
+        if len(text) < 200 and not re.search(r'[±]|\d+\s*мм|\d+,\d+', text):
+            return True
+
     return False
 
 
-# ✅ ФИКС: ужесточён has_keyword_match — минимум 2 совпадения для 2+ значимых слов
-# + исключены общие слова "высотные", "отметки" + спец-правило для "водопропускн"
+# ✅ ФИКС 3: ужесточён has_keyword_match для pipe-вопросов
 def has_keyword_match(c, question):
     stop_words = {
         'какие', 'какой', 'какая', 'что', 'где', 'когда', 'сколько',
         'между', 'также', 'или', 'для', 'при', 'над', 'под', 'без',
         'более', 'менее', 'это', 'все', 'его', 'её', 'их', 'мне',
         'нужно', 'надо', 'должен', 'должна', 'можно', 'есть',
-        # ✅ НОВОЕ: общие слова, которые есть везде — убираем
         'отметки', 'высотные', 'значения', 'допуски', 'допуск',
         'отклонения', 'отклонение', 'требования', 'определение',
         'параметры', 'размеры', 'правила',
@@ -315,24 +323,28 @@ def has_keyword_match(c, question):
         if w.lower() not in stop_words
     ]
 
+    text_lower = (c.get('text') or '').lower()
+
+    # ✅ ФИКС 3: жёсткое правило для водопропускных труб
+    if re.search(r'водопропускн', question, re.IGNORECASE):
+        has_pipe = (
+            'водопропускн' in text_lower
+            or 'звен' in text_lower
+            or 'оголов' in text_lower
+        )
+        if not has_pipe:
+            return False
+        has_target = any(w in text_lower for w in [
+            'отметк', 'допуск', 'отклонен', 'мм', 'строительн',
+            'монтаж', 'положени', 'засыпк', 'сооружени'
+        ])
+        return has_target
+
     if not words:
         return True
 
-    text_lower = (c.get('text') or '').lower()
-
-    # ✅ НОВОЕ: жёсткое правило для водопропускных труб
-    if re.search(r'водопропускн', question, re.IGNORECASE):
-        # Если в фрагменте есть "водопропускн" — пропускаем сразу
-        if 'водопропускн' in text_lower:
-            return True
-        # Иначе — должно быть И "труб" И "отметк" вместе
-        if 'труб' in text_lower and ('отметк' in text_lower or 'высот' in text_lower):
-            return True
-        return False
-
     matches = sum(1 for w in words if w in text_lower)
 
-    # ✅ УЖЕСТОЧЕНО: если в вопросе 2+ значимых слова — требуем минимум 2 совпадения
     if len(words) >= 2:
         return matches >= 2
 
@@ -351,8 +363,13 @@ def search_and_answer(question, selected_sources):
         question, re.IGNORECASE
     ))
 
+    # ✅ ФИКС 2: сужен is_pipe_question — убрано голое "труб[аыу]?\b"
     is_pipe_question = bool(re.search(
-        r'водопропускн|труб[аыу]?\b|звен|оголов',
+        r'водопропускн'
+        r'|звен(?:о|а|ья|ьев|ом|у)?\s+труб'
+        r'|оголов'
+        r'|сооружени[еюя]\s+труб'
+        r'|труб[аыу]?\s+водопропускн',
         question, re.IGNORECASE
     ))
 
@@ -413,7 +430,7 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-    # ✅ НОВОЕ: жёсткий поиск по фразе "водопропускн" — приоритетно
+    # ✅ Жёсткий поиск по фразе "водопропускн" — приоритетно
     if is_pipe_question:
         pipe_markers = [
             "водопропускн",
@@ -428,6 +445,9 @@ def search_and_answer(question, selected_sources):
             "сооружению труб",
             "монтаже трубы",
             "устройства труб",
+            "отметок труб",
+            "отметки труб",
+            "отметки верха труб",
         ]
         for marker in pipe_markers:
             try:
@@ -576,7 +596,7 @@ def search_and_answer(question, selected_sources):
         except Exception:
             pass
 
-    # ✅ ФИКС E: дедупликация по полному хешу
+    # ✅ Дедупликация по полному хешу
     seen = set()
     unique_candidates = []
     for c in candidates:
@@ -590,30 +610,33 @@ def search_and_answer(question, selected_sources):
     if not filtered:
         filtered = unique_candidates
 
-    # ✅ ФИКС H: строгий постфильтр
+    # ✅ Строгий постфильтр
     keyword_filtered = [c for c in filtered if has_keyword_match(c, question)]
     if len(keyword_filtered) >= 3:
         filtered = keyword_filtered
 
-    # ✅ ФИКС: приоритет для СП 46 при вопросе про трубы
+    # ✅ ФИКС 1: исправлен sort_key (инвертированы значения приоритетов)
     def sort_key(c):
-        # Приоритет 1: если вопрос про трубы и это СП 46 — топ
-        pipe_priority = 0 if (
-            is_pipe_question
-            and 'МОСТЫ И ТРУБЫ' in c.get('source', '')
-        ) else 1
+        # Приоритет 1: если вопрос про трубы и это СП 46 — топ (2 — лучший)
+        if is_pipe_question and 'МОСТЫ И ТРУБЫ' in c.get('source', ''):
+            pipe_priority = 2
+        elif is_pipe_question:
+            pipe_priority = 0
+        else:
+            pipe_priority = 1
         # Приоритет 2: Таблица А.1
-        table_a1 = 0 if 'Таблица А.1' in c.get('type', '') else 1
+        table_a1 = 1 if 'Таблица А.1' in c.get('type', '') else 0
         # Приоритет 3: таблицы
-        is_tbl = 0 if c.get('is_table') else 1
+        is_tbl = 1 if c.get('is_table') else 0
         # Приоритет 4: не мусорные главы
         not_trash = 1 if c.get('chapter') not in ('', '3', '1', '2') else 0
+        # Приоритет 5: длина текста (больше — лучше)
         return (pipe_priority, table_a1, is_tbl, not_trash, len(c['text']))
 
     filtered.sort(key=sort_key, reverse=True)
 
-    # ✅ ФИКС A + 429: 8 фрагментов
-    unique_filtered = filtered[:8]
+    # ✅ ФИКС 5: 10 фрагментов
+    unique_filtered = filtered[:10]
 
     context_parts = []
     sources_set = []
@@ -644,7 +667,7 @@ def search_and_answer(question, selected_sources):
 
     context = "".join(context_parts)
 
-    # ✅ ФИКС C + I: ограничение вывода + честное "нет ответа"
+    # ✅ ФИКС 5: промпт — не цитировать общие фразы
     prompt = f"""Ты — эксперт по строительным нормам и правилам (СП, СНиП, ГОСТ).
 
 ВАЖНЫЕ ПРАВИЛА:
@@ -660,6 +683,11 @@ def search_and_answer(question, selected_sources):
 5. Не дублируй один и тот же фрагмент дважды.
 6. Если фрагмент — это строка таблицы, а не раздел документа — НЕ оформляй
    его как «Раздел».
+7. КРИТИЧНО: Если фрагмент содержит ТОЛЬКО общую фразу без конкретных
+   чисел, допусков (±, мм, %) или названий — НЕ цитируй его вообще.
+   Примеры мусора: «Основные положения, допуски, отклонения и посадки»,
+   «Исполнительные схемы с высотными отметками» — такие фразы
+   НЕ являются ответом.
 
 ОСОБОЕ ВНИМАНИЕ (если вопрос про допуски/отклонения):
 - Ищи ВСЕ виды допусков, а не только первый попавшийся:
