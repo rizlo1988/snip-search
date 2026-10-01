@@ -560,10 +560,6 @@ st.markdown('<p class="main-subheader">Задайте вопрос — прог�
 
 
 # ==================== ВВОД ВОПРОСА ====================
-# ✅ ФИКС: логика ввода полностью переработана:
-#    - убрано "глотание" одинаковых вопросов
-#    - поле ввода очищается автоматически через input_version
-#    - после ответа явный st.rerun() → кнопка 🔍 работает всегда
 
 input_key = f"question_input_{st.session_state.input_version}"
 prefill_value = st.session_state.pending_question if st.session_state.pending_question else ""
@@ -584,12 +580,18 @@ with st.form("question_form", clear_on_submit=False):
 
 
 # ==================== ОБРАБОТКА ВОПРОСА ====================
+# ✅ ФИКС: режим "один ответ на экране".
+#    При новом вопросе прошлый ответ СТИРАЕТСЯ из чата.
+#    История вопросов в сайдбаре сохраняется.
 
 user_input = None
 if ask_clicked and user_input_text.strip():
     user_input = user_input_text.strip()
 
 if user_input:
+    # ✅ ГЛАВНОЕ: стираем прошлый ответ — оставляем только новый вопрос
+    st.session_state.messages = []
+
     # Подсказка для коротких вопросов про допуски
     if re.search(r'допуск|отклонени', user_input, re.IGNORECASE) and len(user_input.split()) < 4:
         st.info(
@@ -601,8 +603,10 @@ if user_input:
             "- «допуски на ровность»"
         )
 
-    # Сохраняем вопрос в чат и историю
+    # Добавляем только текущий вопрос
     st.session_state.messages.append({"role": "user", "content": user_input})
+
+    # История вопросов — накапливается отдельно
     if user_input not in st.session_state.history:
         st.session_state.history.append(user_input)
 
@@ -629,8 +633,6 @@ if user_input:
                 "fragments": []
             })
 
-    # ✅ ФИКС: инкремент версии → поле ввода пересоздастся пустым.
-    # ✅ st.rerun() → UI перерисуется, кнопка сработает снова.
     st.session_state.input_version += 1
     st.rerun()
 
