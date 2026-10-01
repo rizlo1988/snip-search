@@ -287,11 +287,8 @@ def is_trash_fragment(c, is_definition_question=False):
     if ch.isdigit() and int(ch) > 30:
         return True
 
-    # ✅ ФИКС: фантомные пункты СП 46.
-    # В СП 46 раздел 7 — «Арматурные и бетонные работы».
-    # Пункт 7.3.7 в реальности про сварку арматуры.
-    # Если фрагмент помечен как раздел 7 СП 46, но содержит текст
-    # про трубы/засыпку/земляные — это фантом парсера.
+    # ✅ Фантомные пункты СП 46: раздел 7 — «Арматурные и бетонные работы».
+    # Если помечено как 7.х, но текст про трубы/засыпку — это ошибка парсера.
     if 'МОСТЫ И ТРУБЫ' in source and ch == '7' and point.startswith('7.'):
         if re.search(r'труб|засыпк|уплотнени[ея] грунта|землян|отсыпк', text, re.IGNORECASE):
             return True
@@ -314,7 +311,7 @@ def is_trash_fragment(c, is_definition_question=False):
     return False
 
 
-# ✅ ФИКС: ужесточён has_keyword_match для pipe-вопросов
+# ✅ Жёсткое правило для водопропускных труб
 def has_keyword_match(c, question):
     stop_words = {
         'какие', 'какой', 'какая', 'что', 'где', 'когда', 'сколько',
@@ -334,9 +331,7 @@ def has_keyword_match(c, question):
     text_lower = (c.get('text') or '').lower()
     source = c.get('source', '')
 
-    # ✅ ФИКС: жёсткое правило для водопропускных труб
     if re.search(r'водопропускн', question, re.IGNORECASE):
-        # Обязательно должно быть про трубу/сооружение
         has_pipe = (
             'водопропускн' in text_lower
             or 'звен' in text_lower
@@ -345,14 +340,12 @@ def has_keyword_match(c, question):
         )
         if not has_pipe:
             return False
-        # И должно быть про отметки/допуски/монтаж/засыпку
         has_target = any(w in text_lower for w in [
             'отметк', 'допуск', 'отклонен', 'мм', 'строительн',
             'монтаж', 'положени', 'засыпк', 'сооружени', 'профил'
         ])
         if not has_target:
             return False
-        # И это должен быть СП 46 «Мосты и трубы» (или ГОСТ по исполнительной геодезии)
         if 'МОСТЫ И ТРУБЫ' in source or '51872' in source:
             return True
         return False
@@ -414,7 +407,7 @@ def search_and_answer(question, selected_sources):
     except Exception:
         pass
 
-    # 2) Поиск по конкретным таблицам
+    # 2) Поиск по конкретным таблицам из вопроса
     table_matches = re.findall(
         r'таблиц[аы]?\s*([А-ЯA-Z]?\.?\d+(?:\.\d+)?)',
         question, re.IGNORECASE
@@ -446,9 +439,8 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-    # ✅ ФИКС: жёсткий поиск по метаданным для водопропускных труб
+    # ✅ Жёсткий поиск по метаданным для водопропускных труб
     if is_pipe_question:
-        # 2.1 — Поиск по точным номерам пунктов и таблиц СП 46
         pipe_specific = [
             ('point', '9.78'),
             ('point', '9.81'),
@@ -485,7 +477,6 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-        # 2.2 — Поиск по маркерам текста (страховка, если метаданные не проставлены)
         pipe_markers = [
             "водопропускн",
             "звеньев труб",
@@ -664,14 +655,12 @@ def search_and_answer(question, selected_sources):
     if not filtered:
         filtered = unique_candidates
 
-    # Строгий постфильтр
     keyword_filtered = [c for c in filtered if has_keyword_match(c, question)]
     if len(keyword_filtered) >= 3:
         filtered = keyword_filtered
 
-    # ✅ ФИКС: sort_key с приоритетом СП 46 + точных метаданных для труб
+    # ✅ Приоритет СП 46 + точных метаданных для труб
     def sort_key(c):
-        # Приоритет 1: для pipe-вопроса — СП 46 «Мосты и трубы»
         if is_pipe_question and 'МОСТЫ И ТРУБЫ' in c.get('source', ''):
             pipe_priority = 2
         elif is_pipe_question:
@@ -679,23 +668,15 @@ def search_and_answer(question, selected_sources):
         else:
             pipe_priority = 1
 
-        # Приоритет 2: точное попадание по метаданным (point 9.78/9.81/9.83, table 13/28)
         is_exact = 1 if c.get('type', '').startswith('точный') else 0
-
-        # Приоритет 3: Таблица А.1
         table_a1 = 1 if 'Таблица А.1' in c.get('type', '') else 0
-
-        # Приоритет 4: таблицы
         is_tbl = 1 if c.get('is_table') else 0
-
-        # Приоритет 5: не мусорные главы
         not_trash = 1 if c.get('chapter') not in ('', '3', '1', '2') else 0
 
         return (pipe_priority, is_exact, table_a1, is_tbl, not_trash, len(c['text']))
 
     filtered.sort(key=sort_key, reverse=True)
 
-    # 10 фрагментов
     unique_filtered = filtered[:10]
 
     context_parts = []
@@ -727,7 +708,6 @@ def search_and_answer(question, selected_sources):
 
     context = "".join(context_parts)
 
-    # ✅ ФИКС: промпт с явной подсказкой про Таблицу 13 и п. 9.78/9.81
     prompt = f"""Ты — эксперт по строительным нормам и правилам (СП, СНиП, ГОСТ).
 
 ВАЖНЫЕ ПРАВИЛА:
@@ -790,7 +770,6 @@ def search_and_answer(question, selected_sources):
 
 ОТВЕТ:"""
 
-    # 429: retry с задержкой
     max_retries = 3
     response = None
     last_error = None
@@ -1028,7 +1007,8 @@ with chat_container:
                 sources = msg.get("sources", [])
                 fragments = msg.get("fragments", [])
 
-                action_cols = st.columns([1, 1, 1, 2])
+                # ✅ Эмодзи-кнопки: PDF, Копировать, 👍, 👎
+                action_cols = st.columns([1, 1, 1, 1, 2])
 
                 with action_cols[0]:
                     if IRONPRESS_OK:
@@ -1049,18 +1029,36 @@ with chat_container:
                     with st.popover("📋 Копировать", use_container_width=True):
                         st.code(msg["content"], language="markdown")
 
+                # ✅ 👍 зелёная кнопка
                 with action_cols[2]:
-                    fb = st.feedback("thumbs", key=f"fb_{idx}_{hash(q)}")
-                    if fb is not None:
-                        if st.session_state.feedback.get(q) != fb:
-                            st.session_state.feedback[q] = fb
-                            log_feedback(q, msg["content"], fb, len(fragments))
+                    current_fb = st.session_state.feedback.get(q)
+                    up_label = "👍" if current_fb != 1 else "✅👍"
+                    if st.button(
+                        up_label,
+                        key=f"fb_up_{idx}_{hash(q)}",
+                        use_container_width=True,
+                        help="Ответ полезен",
+                    ):
+                        st.session_state.feedback[q] = 1
+                        log_feedback(q, msg["content"], 1, len(fragments))
+                        st.toast("👍 Спасибо! Учли.")
+                        st.rerun()
 
-                            if fb == 1:
-                                st.toast("👍 Спасибо! Учли.")
-                            else:
-                                st.toast("👎 Учтём. Можно нажать «Попробовать снова».")
+                # ✅ 👎 красная кнопка
+                with action_cols[3]:
+                    down_label = "👎" if current_fb != 0 else "✅👎"
+                    if st.button(
+                        down_label,
+                        key=f"fb_down_{idx}_{hash(q)}",
+                        use_container_width=True,
+                        help="Ответ неточен",
+                    ):
+                        st.session_state.feedback[q] = 0
+                        log_feedback(q, msg["content"], 0, len(fragments))
+                        st.toast("👎 Учтём. Можно нажать «Попробовать снова».")
+                        st.rerun()
 
+                # Кнопка «Попробовать снова» — только если 👎
                 if st.session_state.feedback.get(q) == 0:
                     if st.button(
                         "🔄 Попробовать снова (расширенный поиск)",
