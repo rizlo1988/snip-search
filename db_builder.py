@@ -29,6 +29,15 @@ HEADER_PATTERNS = [
     re.compile(r'^ГОСТ Р \d+-\d+$'),
     re.compile(r'^ГОСТ \d+-\d+$'),
     re.compile(r'^Применяется с \d+\.\d+\.\d+'),
+    # ✅ НОВОЕ: чистка колонтитулов из ГОСТ Р 51872 и СП 34
+    re.compile(r'^\d+$'),  # строки только из числа (номера страниц)
+    re.compile(r'^ГОСТ Р 51872-2024'),
+    re.compile(r'^СП 34\.13330\.2021'),
+    re.compile(r'^СП 70\.13330\.2012 Несущие'),
+    re.compile(r'^СП 126\.13330\.2017'),
+    re.compile(r'ИС «Техэксперт'),
+    re.compile(r'^КонсультантПлюс: примечание'),
+    re.compile(r'^\s*СП \d+\.\d+\.\d+\.\d+\.\d+$'),
 ]
 
 
@@ -75,6 +84,62 @@ def looks_like_table_context(lines, i, window=6):
     return number_ratio > 0.5 or (has_units and has_columns)
 
 
+# ==================== ПРОВЕРКА "НАСТОЯЩИЙ ЛИ ЭТО ЗАГОЛОВОК РАЗДЕЛА" ====================
+
+# Слова-мусор, которые НЕ могут быть заголовком раздела документа.
+# Это строки из таблиц, которые парсер иногда путает с заголовками.
+TRASH_TITLE_STARTS = (
+    'Отклонение', 'Разность', 'Измерительный', 'То же',
+    'Допускаемые', 'Предельные', 'Наименьшие', 'Наибольшие',
+    'Не более', 'Не менее', 'Св.', 'Св ', 'Примечание',
+    'Значения', 'Величина', 'Параметр', 'Показатель',
+    'Первая', 'Вторая', 'Третья', 'Первый', 'Второй', 'Третий',
+    'До ', 'От ', 'Свыше', 'Менее', 'Более',
+)
+
+
+def is_plausible_chapter_title(title):
+    """Проверяет, может ли строка быть заголовком раздела документа.
+
+    Отсеивает строки из таблиц, которые часто выглядят как заголовки.
+    """
+    title = title.strip()
+
+    # Слишком короткий или слишком длинный — не заголовок
+    if len(title) < 5 or len(title) > 120:
+        return False
+
+    # Начинается с мусорного слова (строки таблицы)
+    for trash in TRASH_TITLE_STARTS:
+        if title.startswith(trash):
+            return False
+
+    # Содержит единицы измерения в начале — это строка таблицы
+    if re.match(r'^\d+\s*(мм|см|м|кг|%|‰|МПа|м/с)', title):
+        return False
+
+    # Заголовок должен начинаться с заглавной буквы (кириллица)
+    if not re.match(r'^[А-ЯЁ]', title):
+        return False
+
+    # Слишком много цифр — это скорее всего строка таблицы
+    digits = sum(c.isdigit() for c in title)
+    if digits > len(title) * 0.3:
+        return False
+
+    # Заголовок не должен состоять преимущественно из знаков препинания
+    letters = sum(c.isalpha() for c in title)
+    if letters < len(title) * 0.5:
+        return False
+
+    return True
+
+
+def is_plausible_section_title(title):
+    """Проверяет, может ли строка быть заголовком подраздела."""
+    return is_plausible_chapter_title(title)  # те же правила
+
+
 # ==================== ПАРСИНГ ====================
 
 def parse_document(text, filename):
@@ -87,14 +152,16 @@ def parse_document(text, filename):
     lines = text.split('\n')
     total_lines = len(lines)
 
-    chapter_full_re = re.compile(r'^(\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{3,100})$')
+    # ✅ УЖЕСТОЧЕНО: требуем заголовок минимум 5 символов и с заглавной буквы
+    chapter_full_re = re.compile(r'^(\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{4,100})$')
     chapter_number_only_re = re.compile(r'^(\d{1,2})$')
-    section_re = re.compile(r'^(\d{1,2}\.\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{3,100})$')
+    section_re = re.compile(r'^(\d{1,2}\.\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{4,100})$')
     point_re = re.compile(r'^(\d{1,2}(?:\.\d{1,2}){1,3})\s+')
     table_re = re.compile(r'^Таблица\s+([А-ЯA-Z]?\.?\d+(?:\.\d+)?[а-яa-z]?)')
     appendix_re = re.compile(r'^Приложение\s+([А-ЯA-Z])')
 
-    title_re = re.compile(r'^[А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{3,100}$')
+    # ✅ УЖЕСТОЧЕНО: заголовок для двухстрочного раздела
+    title_re = re.compile(r'^[А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{4,100}$')
 
     current_chapter = ""
     current_chapter_title = ""
@@ -103,7 +170,7 @@ def parse_document(text, filename):
     current_point = ""
     current_buffer = []
     current_start_line = 0
-    in_appendix = False  # ✅ ФЛАГ: внутри приложения
+    in_appendix = False
 
     def flush_buffer(end_line, is_table=False, table_num=""):
         nonlocal current_buffer, current_start_line
@@ -161,7 +228,6 @@ def parse_document(text, filename):
 
                 if table_re.match(next_stripped):
                     break
-                # ✅ Не прерываем таблицу внутри приложения
                 if re.match(r'^\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\s+[А-ЯЁ]', next_stripped) and not in_appendix:
                     break
                 if chapter_full_re.match(next_stripped) and not in_appendix:
@@ -186,6 +252,7 @@ def parse_document(text, filename):
             continue
 
         # 2. Двухстрочный раздел
+        # ✅ УЖЕСТОЧЕНО: пропускаем, если контекст похож на таблицу
         chapter_num_match = chapter_number_only_re.match(stripped)
         if chapter_num_match and not in_table_context and not in_appendix:
             j = i + 1
@@ -193,7 +260,8 @@ def parse_document(text, filename):
                 j += 1
             if j < total_lines:
                 next_stripped = lines[j].strip()
-                if title_re.match(next_stripped) and len(next_stripped) > 5:
+                # ✅ УЖЕСТОЧЕНО: проверяем через is_plausible_chapter_title
+                if title_re.match(next_stripped) and is_plausible_chapter_title(next_stripped):
                     flush_buffer(i)
                     current_chapter = chapter_num_match.group(1)
                     current_chapter_title = next_stripped
@@ -206,24 +274,30 @@ def parse_document(text, filename):
         # 3. Однострочный раздел
         chapter_match = chapter_full_re.match(stripped)
         if chapter_match and not in_table_context and not in_appendix:
-            flush_buffer(i)
-            current_chapter = chapter_match.group(1)
-            current_chapter_title = chapter_match.group(2).strip()
-            current_section = ""
-            current_section_title = ""
-            current_point = ""
-            i += 1
-            continue
+            title = chapter_match.group(2).strip()
+            # ✅ УЖЕСТОЧЕНО: проверяем заголовок
+            if is_plausible_chapter_title(title):
+                flush_buffer(i)
+                current_chapter = chapter_match.group(1)
+                current_chapter_title = title
+                current_section = ""
+                current_section_title = ""
+                current_point = ""
+                i += 1
+                continue
 
         # 4. Подраздел
         section_match = section_re.match(stripped)
         if section_match and not in_table_context and not in_appendix:
-            flush_buffer(i)
-            current_section = section_match.group(1)
-            current_section_title = section_match.group(2).strip()
-            current_point = ""
-            i += 1
-            continue
+            title = section_match.group(2).strip()
+            # ✅ УЖЕСТОЧЕНО: проверяем заголовок
+            if is_plausible_section_title(title):
+                flush_buffer(i)
+                current_section = section_match.group(1)
+                current_section_title = title
+                current_point = ""
+                i += 1
+                continue
 
         # 5. Пункт
         point_match = point_re.match(stripped)
@@ -243,11 +317,11 @@ def parse_document(text, filename):
             current_section = ""
             current_section_title = ""
             current_point = ""
-            in_appendix = True  # ✅ ВОШЛИ в приложение
+            in_appendix = True
             i += 1
             continue
 
-        # ✅ ВЫХОД из приложения при новом разделе документа
+        # Выход из приложения
         if in_appendix and chapter_full_re.match(stripped) and not in_table_context:
             in_appendix = False
 
