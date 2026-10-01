@@ -23,7 +23,7 @@ st.set_page_config(
 
 # ==================== ЛОГИРОВАНИЕ ОЦЕНОК ====================
 
-FEEDBACK_WEBHOOK_URL = ""  # ← сюда можно вставить URL Google Apps Script
+FEEDBACK_WEBHOOK_URL = ""
 
 
 def log_feedback(question, answer, rating, fragments_count=0):
@@ -88,7 +88,6 @@ st.markdown("""
     }
     [data-testid="stForm"] { border: none; padding: 0; }
 
-    /* ✅ Часы в ЛЕВОМ верхнем углу: дата сверху, время снизу */
     .top-clock {
         position: fixed;
         top: 12px;
@@ -141,19 +140,14 @@ st.markdown("""
             padding: 6px 10px;
             border-radius: 8px;
         }
-        .top-clock .clock-date {
-            font-size: 0.7rem;
-        }
-        .top-clock .clock-time {
-            font-size: 1rem;
-            letter-spacing: 0.5px;
-        }
+        .top-clock .clock-date { font-size: 0.7rem; }
+        .top-clock .clock-time { font-size: 1rem; letter-spacing: 0.5px; }
     }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ✅ Часы в левом верхнем углу (дата сверху, время снизу)
+# ✅ Часы в левом верхнем углу
 import streamlit.components.v1 as components
 
 components.html("""
@@ -302,12 +296,18 @@ def is_trash_fragment(c, is_definition_question=False):
     return False
 
 
+# ✅ ФИКС: ужесточён has_keyword_match — минимум 2 совпадения для 2+ значимых слов
+# + исключены общие слова "высотные", "отметки" + спец-правило для "водопропускн"
 def has_keyword_match(c, question):
     stop_words = {
         'какие', 'какой', 'какая', 'что', 'где', 'когда', 'сколько',
         'между', 'также', 'или', 'для', 'при', 'над', 'под', 'без',
         'более', 'менее', 'это', 'все', 'его', 'её', 'их', 'мне',
         'нужно', 'надо', 'должен', 'должна', 'можно', 'есть',
+        # ✅ НОВОЕ: общие слова, которые есть везде — убираем
+        'отметки', 'высотные', 'значения', 'допуски', 'допуск',
+        'отклонения', 'отклонение', 'требования', 'определение',
+        'параметры', 'размеры', 'правила',
     }
 
     words = [
@@ -319,7 +319,24 @@ def has_keyword_match(c, question):
         return True
 
     text_lower = (c.get('text') or '').lower()
-    return any(w in text_lower for w in words)
+
+    # ✅ НОВОЕ: жёсткое правило для водопропускных труб
+    if re.search(r'водопропускн', question, re.IGNORECASE):
+        # Если в фрагменте есть "водопропускн" — пропускаем сразу
+        if 'водопропускн' in text_lower:
+            return True
+        # Иначе — должно быть И "труб" И "отметк" вместе
+        if 'труб' in text_lower and ('отметк' in text_lower or 'высот' in text_lower):
+            return True
+        return False
+
+    matches = sum(1 for w in words if w in text_lower)
+
+    # ✅ УЖЕСТОЧЕНО: если в вопросе 2+ значимых слова — требуем минимум 2 совпадения
+    if len(words) >= 2:
+        return matches >= 2
+
+    return matches >= 1
 
 
 def search_and_answer(question, selected_sources):
@@ -331,6 +348,11 @@ def search_and_answer(question, selected_sources):
 
     is_definition_question = bool(re.search(
         r'что такое|определени|термин|называется',
+        question, re.IGNORECASE
+    ))
+
+    is_pipe_question = bool(re.search(
+        r'водопропускн|труб[аыу]?\b|звен|оголов',
         question, re.IGNORECASE
     ))
 
@@ -387,6 +409,48 @@ def search_and_answer(question, selected_sources):
                             'is_table': meta.get('is_table', False),
                             'table_number': meta.get('table_number', ''),
                             'type': f'таблица {table_num}'
+                        })
+            except Exception:
+                pass
+
+    # ✅ НОВОЕ: жёсткий поиск по фразе "водопропускн" — приоритетно
+    if is_pipe_question:
+        pipe_markers = [
+            "водопропускн",
+            "звеньев труб",
+            "фундаментных блоков под трубы",
+            "строительный подъем",
+            "продольной оси трубы",
+            "положении смонтированных элементов",
+            "уступов в рядах",
+            "засыпке водопропускных труб",
+            "засыпки водопропускных труб",
+            "сооружению труб",
+            "монтаже трубы",
+            "устройства труб",
+        ]
+        for marker in pipe_markers:
+            try:
+                pipe_query = collection.get(
+                    where_document={"$contains": marker},
+                    limit=20
+                )
+                if pipe_query['documents']:
+                    for i, doc in enumerate(pipe_query['documents']):
+                        meta = pipe_query['metadatas'][i]
+                        if selected_sources and meta.get('source') not in selected_sources:
+                            continue
+                        candidates.append({
+                            'text': doc,
+                            'source': meta.get('source', ''),
+                            'chapter': meta.get('chapter', ''),
+                            'chapter_title': meta.get('chapter_title', ''),
+                            'section': meta.get('section', ''),
+                            'section_title': meta.get('section_title', ''),
+                            'point': meta.get('point', ''),
+                            'is_table': meta.get('is_table', False),
+                            'table_number': meta.get('table_number', ''),
+                            'type': f'фраза труб: {marker[:30]}'
                         })
             except Exception:
                 pass
@@ -456,7 +520,7 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-        # ПОИСК ПО МЕТАДАННЫМ: Таблица А.1
+        # Таблица А.1
         try:
             meta_query = collection.get(
                 where={"$and": [
@@ -487,7 +551,6 @@ def search_and_answer(question, selected_sources):
         except Exception:
             pass
 
-        # ДОПОЛНИТЕЛЬНО: поиск по "$contains" Таблица А.1
         try:
             app_a_query = collection.get(
                 where_document={"$contains": "Таблица А.1"},
@@ -513,7 +576,7 @@ def search_and_answer(question, selected_sources):
         except Exception:
             pass
 
-    # ✅ ФИКС E: дедупликация по полному хешу текста
+    # ✅ ФИКС E: дедупликация по полному хешу
     seen = set()
     unique_candidates = []
     for c in candidates:
@@ -527,21 +590,29 @@ def search_and_answer(question, selected_sources):
     if not filtered:
         filtered = unique_candidates
 
-    # ✅ ФИКС H: строгий постфильтр — оставляем только релевантные
+    # ✅ ФИКС H: строгий постфильтр
     keyword_filtered = [c for c in filtered if has_keyword_match(c, question)]
     if len(keyword_filtered) >= 3:
         filtered = keyword_filtered
 
-    # ✅ СОРТИРОВКА
-    filtered.sort(key=lambda c: (
-        0 if 'Таблица А.1' in c.get('type', '') else 1,
-        0 if c.get('is_table') else 1,
-        1 if c.get('chapter') not in ('', '3', '1', '2') else 0,
-        len(c['text'])
-    ), reverse=True)
+    # ✅ ФИКС: приоритет для СП 46 при вопросе про трубы
+    def sort_key(c):
+        # Приоритет 1: если вопрос про трубы и это СП 46 — топ
+        pipe_priority = 0 if (
+            is_pipe_question
+            and 'МОСТЫ И ТРУБЫ' in c.get('source', '')
+        ) else 1
+        # Приоритет 2: Таблица А.1
+        table_a1 = 0 if 'Таблица А.1' in c.get('type', '') else 1
+        # Приоритет 3: таблицы
+        is_tbl = 0 if c.get('is_table') else 1
+        # Приоритет 4: не мусорные главы
+        not_trash = 1 if c.get('chapter') not in ('', '3', '1', '2') else 0
+        return (pipe_priority, table_a1, is_tbl, not_trash, len(c['text']))
 
-    # ✅ ФИКС A + 429: было [:25], потом [:12] — теперь [:8],
-    # чтобы не упираться в лимит 100 000 токенов/мин
+    filtered.sort(key=sort_key, reverse=True)
+
+    # ✅ ФИКС A + 429: 8 фрагментов
     unique_filtered = filtered[:8]
 
     context_parts = []
@@ -565,7 +636,6 @@ def search_and_answer(question, selected_sources):
         if c.get('table_number'):
             ref_parts.append(f"Таблица {c['table_number']}")
 
-        # ✅ 429: обрезаем длинные фрагменты до 1000 символов
         chunk_text = c['text'][:1000]
         ref = " · ".join(ref_parts)
         context_parts.append(f"\n\n--- Источник: {ref} ---\n{chunk_text}")
@@ -588,10 +658,8 @@ def search_and_answer(question, selected_sources):
 4. ВАЖНО: Отвечай МАКСИМУМ 7 пунктами. Выбери ТОЛЬКО самые
    релевантные фрагменты. Не перечисляй всё подряд.
 5. Не дублируй один и тот же фрагмент дважды.
-6. Если фрагмент — это строка таблицы (например, «Отклонение от
-   совмещения ориентиров 5 мм»), а не раздел документа — НЕ оформляй
-   его как «Раздел». Указывай его как строку соответствующей таблицы
-   или пропускай.
+6. Если фрагмент — это строка таблицы, а не раздел документа — НЕ оформляй
+   его как «Раздел».
 
 ОСОБОЕ ВНИМАНИЕ (если вопрос про допуски/отклонения):
 - Ищи ВСЕ виды допусков, а не только первый попавшийся:
@@ -606,10 +674,10 @@ def search_and_answer(question, selected_sources):
   каких именно допусков нет.
 
 ФОРМАТ ОТВЕТА (для каждого требования):
-- **Документ:** полное название (например, «СП 78.13330.2012 Автомобильные дороги»)
-- **Раздел:** номер и название (например, «8 Дорожные одежды»)
+- **Документ:** полное название
+- **Раздел:** номер и название
 - **Подраздел:** номер и название (если есть)
-- **Пункт:** номер (например, 8.10)
+- **Пункт:** номер
 - **Таблица:** номер (если есть)
 - **Текст требования:** точная цитата или близкий пересказ
 
@@ -621,7 +689,7 @@ def search_and_answer(question, selected_sources):
 
 ОТВЕТ:"""
 
-    # ✅ 429: retry с задержкой при превышении rate limit
+    # ✅ 429: retry с задержкой
     max_retries = 3
     response = None
     last_error = None
@@ -638,7 +706,7 @@ def search_and_answer(question, selected_sources):
             last_error = e
             err_str = str(e)
             if '429' in err_str or 'TooManyRequests' in err_str or 'rate limit' in err_str:
-                wait_time = 15 * (attempt + 1)  # 15, 30, 45 сек
+                wait_time = 15 * (attempt + 1)
                 time.sleep(wait_time)
             else:
                 raise
@@ -723,7 +791,6 @@ with st.sidebar:
                 st.session_state.input_version += 1
                 st.rerun()
 
-    # ✅ ЦВЕТНЫЕ ОЦЕНКИ: 👍 зелёный, 👎 красный
     if st.session_state.feedback:
         st.markdown("---")
         st.markdown("### 📊 Оценки")
@@ -794,7 +861,6 @@ if ask_clicked and user_input_text.strip():
     user_input = user_input_text.strip()
 
 if user_input:
-    # ✅ Стираем прошлый ответ — режим "один ответ на экране"
     st.session_state.messages = []
 
     if re.search(r'допуск|отклонени', user_input, re.IGNORECASE) and len(user_input.split()) < 4:
@@ -882,7 +948,6 @@ with chat_container:
                     with st.popover("📋 Копировать", use_container_width=True):
                         st.code(msg["content"], language="markdown")
 
-                # ✅ Оценки: логируются, не сбрасываются
                 with action_cols[2]:
                     fb = st.feedback("thumbs", key=f"fb_{idx}_{hash(q)}")
                     if fb is not None:
@@ -895,7 +960,6 @@ with chat_container:
                             else:
                                 st.toast("👎 Учтём. Можно нажать «Попробовать снова».")
 
-                # ✅ Кнопка "Попробовать снова" при 👎
                 if st.session_state.feedback.get(q) == 0:
                     if st.button(
                         "🔄 Попробовать снова (расширенный поиск)",
