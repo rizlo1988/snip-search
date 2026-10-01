@@ -472,6 +472,8 @@ def search_and_answer(question, selected_sources):
     return answer, sources_set, unique_filtered
 
 
+# ==================== СЕССИЯ ====================
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "history" not in st.session_state:
@@ -483,6 +485,8 @@ if "pending_question" not in st.session_state:
 if "input_version" not in st.session_state:
     st.session_state.input_version = 0
 
+
+# ==================== САЙДБАР ====================
 
 with st.sidebar:
     st.markdown(
@@ -527,6 +531,7 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.history = []
         st.session_state.feedback = {}
+        st.session_state.pending_question = ""
         st.session_state.input_version += 1
         st.rerun()
 
@@ -537,6 +542,7 @@ with st.sidebar:
         for i, q in enumerate(reversed(st.session_state.history[-10:])):
             if st.button(f"↻ {q[:50]}", key=f"hist_{i}", use_container_width=True):
                 st.session_state.pending_question = q
+                st.session_state.input_version += 1
                 st.rerun()
 
     if st.session_state.feedback:
@@ -547,8 +553,17 @@ with st.sidebar:
         st.markdown(f"👍 **{ups}** · 👎 **{downs}**")
 
 
+# ==================== ЗАГОЛОВОК ====================
+
 st.markdown('<h1 class="main-header">📐 Поиск по СНиПам</h1>', unsafe_allow_html=True)
 st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
+
+
+# ==================== ВВОД ВОПРОСА ====================
+# ✅ ФИКС: логика ввода полностью переработана:
+#    - убрано "глотание" одинаковых вопросов
+#    - поле ввода очищается автоматически через input_version
+#    - после ответа явный st.rerun() → кнопка 🔍 работает всегда
 
 input_key = f"question_input_{st.session_state.input_version}"
 prefill_value = st.session_state.pending_question if st.session_state.pending_question else ""
@@ -567,23 +582,15 @@ with st.form("question_form", clear_on_submit=False):
     with input_cols[1]:
         ask_clicked = st.form_submit_button("🔍", use_container_width=True, type="primary")
 
+
+# ==================== ОБРАБОТКА ВОПРОСА ====================
+
 user_input = None
 if ask_clicked and user_input_text.strip():
     user_input = user_input_text.strip()
 
-
-chat_container = st.container()
-
 if user_input:
-    last_user_msg = None
-    for m in reversed(st.session_state.messages):
-        if m["role"] == "user":
-            last_user_msg = m["content"]
-            break
-    if last_user_msg == user_input:
-        user_input = None
-
-if user_input:
+    # Подсказка для коротких вопросов про допуски
     if re.search(r'допуск|отклонени', user_input, re.IGNORECASE) and len(user_input.split()) < 4:
         st.info(
             "💡 Уточните: допуски на что?\n\n"
@@ -594,6 +601,7 @@ if user_input:
             "- «допуски на ровность»"
         )
 
+    # Сохраняем вопрос в чат и историю
     st.session_state.messages.append({"role": "user", "content": user_input})
     if user_input not in st.session_state.history:
         st.session_state.history.append(user_input)
@@ -610,8 +618,6 @@ if user_input:
                 "fragments": fragments
             })
 
-            st.session_state.input_version += 1
-
         except Exception as e:
             error_msg = f"Произошла ошибка: {e}"
             st.error(error_msg)
@@ -622,6 +628,16 @@ if user_input:
                 "sources": [],
                 "fragments": []
             })
+
+    # ✅ ФИКС: инкремент версии → поле ввода пересоздастся пустым.
+    # ✅ st.rerun() → UI перерисуется, кнопка сработает снова.
+    st.session_state.input_version += 1
+    st.rerun()
+
+
+# ==================== ЧАТ ====================
+
+chat_container = st.container()
 
 with chat_container:
     for idx, msg in enumerate(st.session_state.messages):
