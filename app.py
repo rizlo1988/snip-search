@@ -5,6 +5,7 @@ import re
 import os
 import time
 from datetime import datetime
+from sentence_transformers import CrossEncoder
 from db_builder import build_database, DB_PATH, COLLECTION_NAME
 
 try:
@@ -13,128 +14,13 @@ try:
 except ImportError:
     IRONPRESS_OK = False
 
+
 st.set_page_config(
     page_title="Поиск по СНиПам",
     page_icon="📐",
     layout="wide",
     initial_sidebar_state="auto"
 )
-
-
-# ==================== АУДИТ БАЗЫ (ВРЕМЕННО) ====================
-def audit_database(collection):
-    """Возвращает текстовый отчёт о содержимом базы. Временная диагностика."""
-    import re as _re
-
-    lines = []
-
-    def out(s=""):
-        lines.append(str(s))
-
-    try:
-        all_meta = collection.get(include=["metadatas", "documents"])
-        sources = sorted(set(
-            m["source"] for m in all_meta["metadatas"] if m.get("source")
-        ))
-        out(f"Всего чанков в базе: {len(all_meta['documents'])}")
-        out(f"Всего документов: {len(sources)}")
-        out("=" * 60)
-        out()
-
-        for src in sources:
-            try:
-                r = collection.get(
-                    where={"source": src},
-                    include=["metadatas", "documents"]
-                )
-            except Exception as e:
-                out(f"=== {src} === ОШИБКА: {e}")
-                out()
-                continue
-
-            metas = r["metadatas"]
-            docs = r["documents"]
-            n = len(docs)
-            if n == 0:
-                out(f"=== {src} === пусто")
-                out()
-                continue
-
-            chapters = sorted(set(
-                m.get("chapter", "") for m in metas if m.get("chapter")
-            ))
-            points = sorted(set(
-                m.get("point", "") for m in metas if m.get("point")
-            ))
-            tables = sorted(set(
-                m.get("table_number", "") for m in metas if m.get("table_number")
-            ))
-
-            no_chapter = sum(1 for m in metas if not m.get("chapter"))
-            no_point = sum(1 for m in metas if not m.get("point"))
-            short = sum(1 for d in docs if len(d) < 200)
-            no_digits = sum(1 for d in docs if not _re.search(r"\d", d))
-            avg_len = sum(len(d) for d in docs) / n
-            min_len = min(len(d) for d in docs)
-            max_len = max(len(d) for d in docs)
-
-            out(f"=== {src} ({n} чанков) ===")
-            out(f"  Средняя длина: {avg_len:.0f} символов (min {min_len}, max {max_len})")
-            out(f"  Чанков с пустым chapter: {no_chapter}")
-            out(f"  Чанков с пустым point: {no_point}")
-            out(f"  Чанков <200 символов: {short}")
-            out(f"  Чанков без цифр: {no_digits}")
-            out(f"  Разделов ({len(chapters)}): {chapters}")
-            out(f"  Пунктов ({len(points)}), примеры: {points[:30]}")
-            out(f"  Таблиц ({len(tables)}): {tables}")
-            out()
-
-            # Спец-проверка для СП 46
-            if "МОСТЫ" in src.upper() or "46" in src:
-                out("  >>> Проверка Таблицы 13 в СП 46:")
-
-                try:
-                    t13 = collection.get(
-                        where={"table_number": "13"},
-                        include=["metadatas", "documents"]
-                    )
-                    if t13.get("documents"):
-                        out(f"      Найдено чанков с table_number=13: {len(t13['documents'])}")
-                        for i, d in enumerate(t13["documents"][:3], 1):
-                            out(f"      Чанк {i} (длина {len(d)}):")
-                            out(f"      {d[:400]}...")
-                            out()
-                    else:
-                        out("      ❌ Таблица 13 НЕ найдена по метаданным table_number=13")
-                except Exception as e:
-                    out(f"      Ошибка проверки Таблицы 13: {e}")
-
-                for needle in ["продольной оси трубы",
-                               "уступов в рядах",
-                               "строительным подъемом",
-                               "зазоров между секциями"]:
-                    out(f"  >>> Поиск по тексту '{needle}':")
-                    try:
-                        t_search = collection.get(
-                            where_document={"$contains": needle},
-                            include=["documents"]
-                        )
-                        if t_search.get("documents"):
-                            out(f"      Найдено чанков: {len(t_search['documents'])}")
-                            for i, d in enumerate(t_search["documents"][:2], 1):
-                                out(f"      Чанк {i} (длина {len(d)}): {d[:250]}...")
-                                out()
-                        else:
-                            out(f"      ❌ НЕ найдено в текстах")
-                    except Exception as e:
-                        out(f"      Ошибка поиска: {e}")
-
-                out()
-
-    except Exception as e:
-        out(f"❌ Общая ошибка аудита: {e}")
-
-    return "\n".join(lines)
 
 
 # ==================== ЛОГИРОВАНИЕ ОЦЕНОК ====================
@@ -313,6 +199,12 @@ def load_client():
 client = load_client()
 
 
+# ✅ Этап 3: reranker
+@st.cache_resource(show_spinner=False)
+def load_reranker():
+    return CrossEncoder("BAAI/bge-reranker-base", max_length=512)
+
+
 @st.cache_resource(show_spinner=False)
 def load_collection():
     need_build = not os.path.exists(DB_PATH)
@@ -351,156 +243,48 @@ def count_sources():
 sources_list = count_sources()
 
 
-# ==================== ФИЛЬТР МУСОРА ====================
+# ==================== RERANKER ====================
 
-TRASH_CHAPTERS = {'1', '2'}
-TRASH_TITLE_PATTERNS = [
-    re.compile(r'Нормативные ссылки', re.IGNORECASE),
-    re.compile(r'Область применения', re.IGNORECASE),
-]
+def rerank_candidates(question, candidates, top_k=10):
+    """Прогоняет кандидатов через cross-encoder, возвращает топ-K."""
+    if not candidates:
+        return []
 
-BAD_CHAPTERS_BY_DOC = {
-    'НЕСУЩИЕ И ОГРАЖДАЮЩИЕ': {
-        '4', '5', '6', '7', '8', '13', '14',
-        '20', '26', '30', '35', '37',
-    },
-    'МОСТЫ И ТРУБЫ': {
-        '4', '6', '9', '13', '20', '26', '30', '35', '37',
-    },
-}
+    try:
+        reranker = load_reranker()
+    except Exception as e:
+        print(f"[RERANK] не удалось загрузить reranker: {e}")
+        return candidates[:top_k]
 
-BAD_TITLE_PREFIXES = (
-    'Отклонение',
-    'Разность',
-    'Измерительный',
-    'То же',
-    'Допускаемое соединение',
-    'Допускаемые соединения',
-    'Устройство асфальтобетонного покрытия',
-    'Инъецирование закрытых каналов',
-    'Нормальное прохождение',
-    'Операцию по выпуску',
-)
+    # Ограничиваем длину текста — экономия памяти и скорости
+    pairs = [(question, (c.get("text") or "")[:1500]) for c in candidates]
+
+    try:
+        scores = reranker.predict(pairs, batch_size=16, show_progress_bar=False)
+    except Exception as e:
+        print(f"[RERANK] ошибка predict: {e}")
+        return candidates[:top_k]
+
+    scored = list(zip(candidates, scores))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [c for c, _ in scored[:top_k]]
 
 
-def is_trash_fragment(c, is_definition_question=False):
-    ch = c.get('chapter', '')
-    ch_title = c.get('chapter_title', '')
-    source = c.get('source', '')
-    text = c.get('text', '') or ''
-    point = c.get('point', '')
+# ==================== ПОИСК ====================
 
-    if not is_definition_question and ch == '3':
-        return True
-
-    if ch in TRASH_CHAPTERS:
-        return True
-
-    for p in TRASH_TITLE_PATTERNS:
-        if p.search(ch_title):
-            return True
-
-    if ch.isdigit() and int(ch) > 30:
-        return True
-
-    if 'МОСТЫ И ТРУБЫ' in source and ch == '7' and point.startswith('7.'):
-        if re.search(r'труб|засыпк|уплотнени[ея] грунта|землян|отсыпк', text, re.IGNORECASE):
-            return True
-
-    for doc_key, bad_chapters in BAD_CHAPTERS_BY_DOC.items():
-        if doc_key in source and ch in bad_chapters:
-            title_stripped = ch_title.strip()
-            if title_stripped.startswith(BAD_TITLE_PREFIXES):
-                return True
-            if re.search(r'\bмм\b', title_stripped) and len(title_stripped) < 80:
-                return True
-
-    if ch.startswith('Приложение'):
-        if not c.get('table_number'):
-            if not re.search(r'[±]|\d+\s*мм|\d+,\d+', text):
-                return True
-        if len(text) < 200 and not re.search(r'[±]|\d+\s*мм|\d+,\d+', text):
-            return True
-
-    return False
-
-
-def has_keyword_match(c, question):
-    stop_words = {
-        'какие', 'какой', 'какая', 'что', 'где', 'когда', 'сколько',
-        'между', 'также', 'или', 'для', 'при', 'над', 'под', 'без',
-        'более', 'менее', 'это', 'все', 'его', 'её', 'их', 'мне',
-        'нужно', 'надо', 'должен', 'должна', 'можно', 'есть',
-        'отметки', 'высотные', 'значения', 'допуски', 'допуск',
-        'отклонения', 'отклонение', 'требования', 'определение',
-        'параметры', 'размеры', 'правила',
-    }
-
-    words = [
-        w.lower() for w in re.findall(r'[а-яёa-z]{5,}', question.lower())
-        if w.lower() not in stop_words
-    ]
-
-    text_lower = (c.get('text') or '').lower()
-    source = c.get('source', '')
-
-    if re.search(r'водопропускн', question, re.IGNORECASE):
-        has_pipe = (
-            'водопропускн' in text_lower
-            or 'звен' in text_lower
-            or 'оголов' in text_lower
-            or 'мгт' in text_lower
-        )
-        if not has_pipe:
-            return False
-        has_target = any(w in text_lower for w in [
-            'отметк', 'допуск', 'отклонен', 'мм', 'строительн',
-            'монтаж', 'положени', 'засыпк', 'сооружени', 'профил',
-            'уступ', 'зазор', 'ось трубы'
-        ])
-        if not has_target:
-            return False
-        if 'МОСТЫ И ТРУБЫ' in source or '51872' in source:
-            return True
-        return False
-
-    if not words:
-        return True
-
-    matches = sum(1 for w in words if w in text_lower)
-
-    if len(words) >= 2:
-        return matches >= 2
-
-    return matches >= 1
-
-
-def search_and_answer(question, selected_sources):
+def gather_candidates(question, selected_sources, limit_vector=40):
+    """Собирает кандидатов из векторного поиска и поиска по таблицам."""
     candidates = []
 
     where_filter = None
     if selected_sources:
         where_filter = {"source": {"$in": selected_sources}}
 
-    is_definition_question = bool(re.search(
-        r'что такое|определени|термин|называется',
-        question, re.IGNORECASE
-    ))
-
-    is_pipe_question = bool(re.search(
-        r'водопропускн'
-        r'|звен(?:о|а|ья|ьев|ом|у)?\s+труб'
-        r'|оголов'
-        r'|сооружени[еюя]\s+труб'
-        r'|труб[аыу]?\s+водопропускн',
-        question, re.IGNORECASE
-    ))
-
     # 1) Векторный поиск
     try:
         vector_results = collection.query(
             query_texts=[question],
-            n_results=40,
+            n_results=limit_vector,
             where=where_filter
         )
         if vector_results['documents'] and vector_results['documents'][0]:
@@ -521,231 +305,20 @@ def search_and_answer(question, selected_sources):
     except Exception:
         pass
 
-    # 2) Поиск по таблицам из вопроса
+    # 2) Явное упоминание таблицы в вопросе
     table_matches = re.findall(
         r'таблиц[аы]?\s*([А-ЯA-Z]?\.?\d+(?:\.\d+)?)',
         question, re.IGNORECASE
     )
-    if table_matches:
-        for table_num in table_matches:
-            try:
-                table_results = collection.get(
-                    where_document={"$contains": f"Таблица {table_num}"},
-                    limit=10
-                )
-                if table_results['documents']:
-                    for i, doc in enumerate(table_results['documents']):
-                        meta = table_results['metadatas'][i]
-                        if selected_sources and meta.get('source') not in selected_sources:
-                            continue
-                        candidates.append({
-                            'text': doc,
-                            'source': meta.get('source', ''),
-                            'chapter': meta.get('chapter', ''),
-                            'chapter_title': meta.get('chapter_title', ''),
-                            'section': meta.get('section', ''),
-                            'section_title': meta.get('section_title', ''),
-                            'point': meta.get('point', ''),
-                            'is_table': meta.get('is_table', False),
-                            'table_number': meta.get('table_number', ''),
-                            'type': f'таблица {table_num}'
-                        })
-            except Exception:
-                pass
-
-    # ✅ Жёсткий поиск по метаданным для водопропускных труб
-    if is_pipe_question:
-        pipe_specific = [
-            ('point', '9.78'),
-            ('point', '9.81'),
-            ('point', '9.83'),
-            ('point', '4.7'),
-            ('point', '12.7'),
-            ('point', '12.13'),
-            ('table_number', '13'),
-            ('table_number', '28'),
-        ]
-        for key, val in pipe_specific:
-            try:
-                q = collection.get(
-                    where={key: val},
-                    limit=15
-                )
-                if q['documents']:
-                    for i, doc in enumerate(q['documents']):
-                        meta = q['metadatas'][i]
-                        if selected_sources and meta.get('source') not in selected_sources:
-                            continue
-                        candidates.append({
-                            'text': doc,
-                            'source': meta.get('source', ''),
-                            'chapter': meta.get('chapter', ''),
-                            'chapter_title': meta.get('chapter_title', ''),
-                            'section': meta.get('section', ''),
-                            'section_title': meta.get('section_title', ''),
-                            'point': meta.get('point', ''),
-                            'is_table': meta.get('is_table', False),
-                            'table_number': meta.get('table_number', ''),
-                            'type': f'точный {key}={val}'
-                        })
-            except Exception:
-                pass
-
-        pipe_markers = [
-            "продольной оси трубы",
-            "уступов в рядах",
-            "уступы в рядах фундаментных блоков",
-            "зазоров между секциями фундаментов",
-            "относительные смещения железобетонных",
-            "длины и ширины секций фундаментов",
-            "Минимальная засыпка для пропуска паводковых вод",
-            "Ширина прогала в насыпи",
-            "Коэффициент уплотнения грунта грунтовой призмы",
-            "Толщина отсыпаемых слоев",
-            "водопропускн",
-            "звеньев труб",
-            "фундаментных блоков под трубы",
-            "строительный подъем",
-            "положении смонтированных элементов",
-            "засыпке водопропускных труб",
-            "засыпки водопропускных труб",
-            "сооружению труб",
-            "монтаже трубы",
-            "устройства труб",
-            "отметок труб",
-            "отметки труб",
-            "отметки верха труб",
-        ]
-        for marker in pipe_markers:
-            try:
-                pipe_query = collection.get(
-                    where_document={"$contains": marker},
-                    limit=20
-                )
-                if pipe_query['documents']:
-                    for i, doc in enumerate(pipe_query['documents']):
-                        meta = pipe_query['metadatas'][i]
-                        if selected_sources and meta.get('source') not in selected_sources:
-                            continue
-                        candidates.append({
-                            'text': doc,
-                            'source': meta.get('source', ''),
-                            'chapter': meta.get('chapter', ''),
-                            'chapter_title': meta.get('chapter_title', ''),
-                            'section': meta.get('section', ''),
-                            'section_title': meta.get('section_title', ''),
-                            'point': meta.get('point', ''),
-                            'is_table': meta.get('is_table', False),
-                            'table_number': meta.get('table_number', ''),
-                            'type': f'маркер труб: {marker[:30]}'
-                        })
-            except Exception:
-                pass
-
-    # 3) Универсальный поиск по маркерам
-    if re.search(
-        r'допуск|отклонени|отметк|ширин|уклон|ровност|толщин|'
-        r'предельн|значени|параметр|размер|погрешн|расстоян|'
-        r'таблиц|приложени|'
-        r'труб|водопропускн|оголов|звен|'
-        r'мост|опор|балк|пролетн|сва[ий]|'
-        r'фундамент|арматур|сварк|шов|бетон',
-        question, re.IGNORECASE
-    ):
-        markers = [
-            "Таблица",
-            "Допускаемые отклонения",
-            "Допускаемые значения",
-            "Предельные отклонения",
-            "просвет под рейкой",
-            "Не более",
-            "Высотные отметки",
-            "Толщина слоя",
-            "Поперечные уклоны",
-            "Ширина слоя",
-            "Превышение граней",
-            "Прямолинейность",
-            "водопропускн",
-            "трубы",
-            "звень",
-            "оголов",
-            "фундамент труб",
-            "засыпк",
-            "опор мост",
-            "пролетн",
-            "сва[ий]",
-            "арматур",
-            "сварн",
-            "бетонирова",
-        ]
-
-        for marker in markers:
-            try:
-                marker_query = collection.get(
-                    where_document={"$contains": marker},
-                    limit=30
-                )
-                if marker_query['documents']:
-                    for i, doc in enumerate(marker_query['documents']):
-                        meta = marker_query['metadatas'][i]
-                        if selected_sources and meta.get('source') not in selected_sources:
-                            continue
-                        if not re.search(r'[±]|\d+\s*мм|\d+,\d+', doc):
-                            continue
-                        candidates.append({
-                            'text': doc,
-                            'source': meta.get('source', ''),
-                            'chapter': meta.get('chapter', ''),
-                            'chapter_title': meta.get('chapter_title', ''),
-                            'section': meta.get('section', ''),
-                            'section_title': meta.get('section_title', ''),
-                            'point': meta.get('point', ''),
-                            'is_table': True,
-                            'table_number': meta.get('table_number', ''),
-                            'type': f'маркер: {marker[:30]}'
-                        })
-            except Exception:
-                pass
-
-        # Таблица А.1
+    for table_num in table_matches:
         try:
-            meta_query = collection.get(
-                where={"$and": [
-                    {"chapter": "Приложение А"},
-                    {"is_table": True}
-                ]},
+            r = collection.get(
+                where={"table_number": table_num},
                 limit=10
             )
-            if meta_query['documents']:
-                for i, doc in enumerate(meta_query['documents']):
-                    meta = meta_query['metadatas'][i]
-                    if selected_sources and meta.get('source') not in selected_sources:
-                        continue
-                    if 'Таблица А.1' not in doc and 'А.1' not in meta.get('table_number', ''):
-                        continue
-                    candidates.append({
-                        'text': doc,
-                        'source': meta.get('source', ''),
-                        'chapter': meta.get('chapter', ''),
-                        'chapter_title': meta.get('chapter_title', ''),
-                        'section': meta.get('section', ''),
-                        'section_title': meta.get('section_title', ''),
-                        'point': meta.get('point', ''),
-                        'is_table': True,
-                        'table_number': 'А.1',
-                        'type': 'Таблица А.1 (метаданные)'
-                    })
-        except Exception:
-            pass
-
-        try:
-            app_a_query = collection.get(
-                where_document={"$contains": "Таблица А.1"},
-                limit=10
-            )
-            if app_a_query['documents']:
-                for i, doc in enumerate(app_a_query['documents']):
-                    meta = app_a_query['metadatas'][i]
+            if r['documents']:
+                for i, doc in enumerate(r['documents']):
+                    meta = r['metadatas'][i]
                     if selected_sources and meta.get('source') not in selected_sources:
                         continue
                     candidates.append({
@@ -756,64 +329,44 @@ def search_and_answer(question, selected_sources):
                         'section': meta.get('section', ''),
                         'section_title': meta.get('section_title', ''),
                         'point': meta.get('point', ''),
-                        'is_table': True,
-                        'table_number': 'А.1',
-                        'type': 'Таблица А.1 (допуски)'
+                        'is_table': meta.get('is_table', True),
+                        'table_number': meta.get('table_number', ''),
+                        'type': f'таблица {table_num}'
                     })
         except Exception:
             pass
 
-    # Дедупликация по полному хешу
+    # Дедупликация по тексту
     seen = set()
-    unique_candidates = []
+    unique = []
     for c in candidates:
-        key = hash(c['text'])
+        key = c['text'][:500]
         if key not in seen:
             seen.add(key)
-            unique_candidates.append(c)
+            unique.append(c)
 
-    filtered = [c for c in unique_candidates if not is_trash_fragment(c, is_definition_question)]
+    return unique
 
-    if not filtered:
-        filtered = unique_candidates
 
-    if is_pipe_question:
-        keyword_filtered = [c for c in filtered if has_keyword_match(c, question)]
-        if keyword_filtered:
-            filtered = keyword_filtered
-    else:
-        keyword_filtered = [c for c in filtered if has_keyword_match(c, question)]
-        if len(keyword_filtered) >= 3:
-            filtered = keyword_filtered
+def search_and_answer(question, selected_sources):
+    # 1. Собрать кандидатов
+    candidates = gather_candidates(question, selected_sources)
 
-    def sort_key(c):
-        if is_pipe_question and 'МОСТЫ И ТРУБЫ' in c.get('source', ''):
-            pipe_priority = 2
-        elif is_pipe_question:
-            pipe_priority = 0
-        else:
-            pipe_priority = 1
+    if not candidates:
+        return (
+            "В найденных фрагментах нет полного ответа по этому вопросу.",
+            [],
+            []
+        )
 
-        is_exact = 1 if c.get('type', '').startswith('точный') else 0
-        is_marker = 1 if c.get('type', '').startswith('маркер труб') else 0
-        table_a1 = 1 if 'Таблица А.1' in c.get('type', '') else 0
-        is_tbl = 1 if c.get('is_table') else 0
+    # 2. Reranker: топ-50 → топ-10
+    pre_top = candidates[:50]
+    top = rerank_candidates(question, pre_top, top_k=10)
 
-        text = c.get('text', '')
-        has_numbers = 1 if re.search(r'[±]|\d+\s*мм|\d+,\d+|-\d+\s*мм', text) else 0
-
-        not_trash = 1 if c.get('chapter') not in ('', '3', '1', '2') else 0
-
-        return (pipe_priority, is_exact, is_marker, has_numbers,
-                table_a1, is_tbl, not_trash, len(c['text']))
-
-    filtered.sort(key=sort_key, reverse=True)
-
-    unique_filtered = filtered[:10]
-
+    # 3. Формируем контекст
     context_parts = []
     sources_set = []
-    for c in unique_filtered:
+    for c in top:
         ref_parts = [c['source'].replace('.txt', '')]
         if c.get('chapter'):
             ch_title = c.get('chapter_title', '')
@@ -861,13 +414,6 @@ def search_and_answer(question, selected_sources):
    «Технические требования. Контроль. Способ контроля» — такие фразы
    НЕ являются ответом.
 
-ЖЁСТКОЕ ПРАВИЛО ДЛЯ ВОДОПРОПУСКНЫХ ТРУБ:
-Если в вопросе есть слово «водопропускн» — работай ТОЛЬКО с фрагментами,
-в которых есть одно из слов: «водопропускн», «звен», «оголов», «МГТ»,
-«труб». Фрагменты из СП 78 (Автомобильные дороги), СП 34, СП 126
-и других дорожных/геодезических документов про «высотные отметки
-продольного профиля» — ИГНОРИРУЙ, они НЕ относятся к трубам.
-
 ОСОБОЕ ВНИМАНИЕ (если вопрос про допуски/отклонения):
 - Ищи ВСЕ виды допусков, а не только первый попавшийся:
   * допуски на высотные отметки
@@ -877,19 +423,6 @@ def search_and_answer(question, selected_sources):
   * допуски на толщину слоёв
   * допуски на прямолинейность
 - В таблицах обычно перечислены ВСЕ допуски — проверь их.
-
-ЕСЛИ ВОПРОС ПРО ВОДОПРОПУСКНЫЕ ТРУБЫ:
-- Допуски на положение смонтированных элементов труб — в СП 46.13330.2012,
-  Таблица 13 (уступы в рядах фундаментных блоков ≤10 мм, зазоры между
-  секциями и звеньями ±5 мм, продольная ось трубы в профиле и плане −30 мм).
-- Монтаж блоков фундамента под трубы — п. 9.78 (установка на основание
-  с проектным уклоном и заданным строительным подъёмом).
-- Монтаж звеньев труб — п. 9.81.
-- Приёмка трубы до засыпки — п. 9.83.
-- Толщина слоя грунта над трубой при переезде — п. 12.7.
-- Минимальная засыпка для пропуска паводковых вод — Таблица 28.
-- Контроль положения звеньев через 2-3 мес после засыпки — п. 4.7.
-Ищи в первую очередь эти пункты и таблицы.
 
 ФОРМАТ ОТВЕТА (для каждого требования):
 - **Документ:** полное название
@@ -931,7 +464,7 @@ def search_and_answer(question, selected_sources):
         raise last_error
 
     answer = response.choices[0].message.content
-    return answer, sources_set, unique_filtered
+    return answer, sources_set, top
 
 
 # ==================== СЕССИЯ ====================
@@ -946,12 +479,6 @@ if "pending_question" not in st.session_state:
     st.session_state.pending_question = ""
 if "input_version" not in st.session_state:
     st.session_state.input_version = 0
-if "retry_question" not in st.session_state:
-    st.session_state.retry_question = None
-if "expanded_search" not in st.session_state:
-    st.session_state.expanded_search = False
-if "show_audit" not in st.session_state:
-    st.session_state.show_audit = False
 
 
 # ==================== САЙДБАР ====================
@@ -995,8 +522,6 @@ with st.sidebar:
         st.session_state.history = []
         st.session_state.feedback = {}
         st.session_state.pending_question = ""
-        st.session_state.retry_question = None
-        st.session_state.expanded_search = False
         st.session_state.input_version += 1
         st.rerun()
 
@@ -1044,34 +569,6 @@ with st.sidebar:
 
         if st.button("♻️ Сбросить оценки", key="reset_feedback_btn", use_container_width=True):
             st.session_state.feedback = {}
-            st.rerun()
-
-    # ==================== ВРЕМЕННАЯ КНОПКА АУДИТА ====================
-    # ⚠️ УДАЛИТЬ ПОСЛЕ ДИАГНОСТИКИ
-    st.markdown("---")
-    st.markdown("### 🛠️ Диагностика")
-    if st.button("🔍 Аудит базы", key="audit_btn", use_container_width=True):
-        st.session_state.show_audit = True
-        st.rerun()
-
-    if st.session_state.get("show_audit"):
-        with st.spinner("⏳ Собираю статистику по базе..."):
-            audit_text = audit_database(collection)
-        st.text_area(
-            "Результат аудита (скопируйте всё)",
-            value=audit_text,
-            height=400,
-            key="audit_output"
-        )
-        st.download_button(
-            "💾 Скачать audit.txt",
-            data=audit_text.encode("utf-8"),
-            file_name="audit.txt",
-            mime="text/plain",
-            key="audit_download"
-        )
-        if st.button("❌ Закрыть аудит", key="audit_close", use_container_width=True):
-            st.session_state.show_audit = False
             st.rerun()
 
 
@@ -1127,12 +624,7 @@ if user_input:
 
     with st.spinner("⏳ Ищу ответ в документах…"):
         try:
-            current_question = user_input
-            if st.session_state.expanded_search:
-                current_question = user_input + " допуски отклонения таблица приложение"
-                st.session_state.expanded_search = False
-
-            answer, sources, fragments = search_and_answer(current_question, selected_sources)
+            answer, sources, fragments = search_and_answer(user_input, selected_sources)
 
             st.session_state.messages.append({
                 "role": "assistant",
@@ -1219,18 +711,7 @@ with chat_container:
                     ):
                         st.session_state.feedback[q] = 0
                         log_feedback(q, msg["content"], 0, len(fragments))
-                        st.toast("👎 Учтём. Можно нажать «Попробовать снова».")
-                        st.rerun()
-
-                if st.session_state.feedback.get(q) == 0:
-                    if st.button(
-                        "🔄 Попробовать снова (расширенный поиск)",
-                        key=f"retry_{idx}_{hash(q)}",
-                        use_container_width=True,
-                    ):
-                        st.session_state.pending_question = q
-                        st.session_state.expanded_search = True
-                        st.session_state.input_version += 1
+                        st.toast("👎 Учтём.")
                         st.rerun()
 
                 if sources:
