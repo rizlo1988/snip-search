@@ -21,6 +21,122 @@ st.set_page_config(
 )
 
 
+# ==================== АУДИТ БАЗЫ (ВРЕМЕННО) ====================
+def audit_database(collection):
+    """Возвращает текстовый отчёт о содержимом базы. Временная диагностика."""
+    import re as _re
+
+    lines = []
+
+    def out(s=""):
+        lines.append(str(s))
+
+    try:
+        all_meta = collection.get(include=["metadatas", "documents"])
+        sources = sorted(set(
+            m["source"] for m in all_meta["metadatas"] if m.get("source")
+        ))
+        out(f"Всего чанков в базе: {len(all_meta['documents'])}")
+        out(f"Всего документов: {len(sources)}")
+        out("=" * 60)
+        out()
+
+        for src in sources:
+            try:
+                r = collection.get(
+                    where={"source": src},
+                    include=["metadatas", "documents"]
+                )
+            except Exception as e:
+                out(f"=== {src} === ОШИБКА: {e}")
+                out()
+                continue
+
+            metas = r["metadatas"]
+            docs = r["documents"]
+            n = len(docs)
+            if n == 0:
+                out(f"=== {src} === пусто")
+                out()
+                continue
+
+            chapters = sorted(set(
+                m.get("chapter", "") for m in metas if m.get("chapter")
+            ))
+            points = sorted(set(
+                m.get("point", "") for m in metas if m.get("point")
+            ))
+            tables = sorted(set(
+                m.get("table_number", "") for m in metas if m.get("table_number")
+            ))
+
+            no_chapter = sum(1 for m in metas if not m.get("chapter"))
+            no_point = sum(1 for m in metas if not m.get("point"))
+            short = sum(1 for d in docs if len(d) < 200)
+            no_digits = sum(1 for d in docs if not _re.search(r"\d", d))
+            avg_len = sum(len(d) for d in docs) / n
+            min_len = min(len(d) for d in docs)
+            max_len = max(len(d) for d in docs)
+
+            out(f"=== {src} ({n} чанков) ===")
+            out(f"  Средняя длина: {avg_len:.0f} символов (min {min_len}, max {max_len})")
+            out(f"  Чанков с пустым chapter: {no_chapter}")
+            out(f"  Чанков с пустым point: {no_point}")
+            out(f"  Чанков <200 символов: {short}")
+            out(f"  Чанков без цифр: {no_digits}")
+            out(f"  Разделов ({len(chapters)}): {chapters}")
+            out(f"  Пунктов ({len(points)}), примеры: {points[:30]}")
+            out(f"  Таблиц ({len(tables)}): {tables}")
+            out()
+
+            # Спец-проверка для СП 46
+            if "МОСТЫ" in src.upper() or "46" in src:
+                out("  >>> Проверка Таблицы 13 в СП 46:")
+
+                try:
+                    t13 = collection.get(
+                        where={"table_number": "13"},
+                        include=["metadatas", "documents"]
+                    )
+                    if t13.get("documents"):
+                        out(f"      Найдено чанков с table_number=13: {len(t13['documents'])}")
+                        for i, d in enumerate(t13["documents"][:3], 1):
+                            out(f"      Чанк {i} (длина {len(d)}):")
+                            out(f"      {d[:400]}...")
+                            out()
+                    else:
+                        out("      ❌ Таблица 13 НЕ найдена по метаданным table_number=13")
+                except Exception as e:
+                    out(f"      Ошибка проверки Таблицы 13: {e}")
+
+                for needle in ["продольной оси трубы",
+                               "уступов в рядах",
+                               "строительным подъемом",
+                               "зазоров между секциями"]:
+                    out(f"  >>> Поиск по тексту '{needle}':")
+                    try:
+                        t_search = collection.get(
+                            where_document={"$contains": needle},
+                            include=["documents"]
+                        )
+                        if t_search.get("documents"):
+                            out(f"      Найдено чанков: {len(t_search['documents'])}")
+                            for i, d in enumerate(t_search["documents"][:2], 1):
+                                out(f"      Чанк {i} (длина {len(d)}): {d[:250]}...")
+                                out()
+                        else:
+                            out(f"      ❌ НЕ найдено в текстах")
+                    except Exception as e:
+                        out(f"      Ошибка поиска: {e}")
+
+                out()
+
+    except Exception as e:
+        out(f"❌ Общая ошибка аудита: {e}")
+
+    return "\n".join(lines)
+
+
 # ==================== ЛОГИРОВАНИЕ ОЦЕНОК ====================
 
 FEEDBACK_WEBHOOK_URL = ""
@@ -287,7 +403,6 @@ def is_trash_fragment(c, is_definition_question=False):
     if ch.isdigit() and int(ch) > 30:
         return True
 
-    # ✅ Фантомные пункты СП 46: раздел 7 — арматура/бетон, не трубы
     if 'МОСТЫ И ТРУБЫ' in source and ch == '7' and point.startswith('7.'):
         if re.search(r'труб|засыпк|уплотнени[ея] грунта|землян|отсыпк', text, re.IGNORECASE):
             return True
@@ -310,7 +425,6 @@ def is_trash_fragment(c, is_definition_question=False):
     return False
 
 
-# ✅ Жёсткий фильтр для водопропускных труб
 def has_keyword_match(c, question):
     stop_words = {
         'какие', 'какой', 'какая', 'что', 'где', 'когда', 'сколько',
@@ -477,21 +591,17 @@ def search_and_answer(question, selected_sources):
             except Exception:
                 pass
 
-        # ✅ Поиск по уникальным маркерам Таблицы 13 и 28
         pipe_markers = [
-            # Таблица 13
             "продольной оси трубы",
             "уступов в рядах",
             "уступы в рядах фундаментных блоков",
             "зазоров между секциями фундаментов",
             "относительные смещения железобетонных",
             "длины и ширины секций фундаментов",
-            # Таблица 28
             "Минимальная засыпка для пропуска паводковых вод",
             "Ширина прогала в насыпи",
             "Коэффициент уплотнения грунта грунтовой призмы",
             "Толщина отсыпаемых слоев",
-            # Общие
             "водопропускн",
             "звеньев труб",
             "фундаментных блоков под трубы",
@@ -667,8 +777,6 @@ def search_and_answer(question, selected_sources):
     if not filtered:
         filtered = unique_candidates
 
-    # ✅ ФИКС: для pipe-вопросов применяем фильтр ВСЕГДА
-    # (даже если после него осталось 1-2 фрагмента)
     if is_pipe_question:
         keyword_filtered = [c for c in filtered if has_keyword_match(c, question)]
         if keyword_filtered:
@@ -678,7 +786,6 @@ def search_and_answer(question, selected_sources):
         if len(keyword_filtered) >= 3:
             filtered = keyword_filtered
 
-    # ✅ Приоритет СП 46 + точных метаданных + наличие цифр
     def sort_key(c):
         if is_pipe_question and 'МОСТЫ И ТРУБЫ' in c.get('source', ''):
             pipe_priority = 2
@@ -692,7 +799,6 @@ def search_and_answer(question, selected_sources):
         table_a1 = 1 if 'Таблица А.1' in c.get('type', '') else 0
         is_tbl = 1 if c.get('is_table') else 0
 
-        # ✅ Приоритет для чанков с реальными цифрами
         text = c.get('text', '')
         has_numbers = 1 if re.search(r'[±]|\d+\s*мм|\d+,\d+|-\d+\s*мм', text) else 0
 
@@ -726,7 +832,7 @@ def search_and_answer(question, selected_sources):
         if c.get('table_number'):
             ref_parts.append(f"Таблица {c['table_number']}")
 
-        chunk_text = c['text'][:1500]  # ✅ ФИКС: было 1000, стало 1500
+        chunk_text = c['text'][:1500]
         ref = " · ".join(ref_parts)
         context_parts.append(f"\n\n--- Источник: {ref} ---\n{chunk_text}")
         if ref not in sources_set:
@@ -844,6 +950,8 @@ if "retry_question" not in st.session_state:
     st.session_state.retry_question = None
 if "expanded_search" not in st.session_state:
     st.session_state.expanded_search = False
+if "show_audit" not in st.session_state:
+    st.session_state.show_audit = False
 
 
 # ==================== САЙДБАР ====================
@@ -936,6 +1044,34 @@ with st.sidebar:
 
         if st.button("♻️ Сбросить оценки", key="reset_feedback_btn", use_container_width=True):
             st.session_state.feedback = {}
+            st.rerun()
+
+    # ==================== ВРЕМЕННАЯ КНОПКА АУДИТА ====================
+    # ⚠️ УДАЛИТЬ ПОСЛЕ ДИАГНОСТИКИ
+    st.markdown("---")
+    st.markdown("### 🛠️ Диагностика")
+    if st.button("🔍 Аудит базы", key="audit_btn", use_container_width=True):
+        st.session_state.show_audit = True
+        st.rerun()
+
+    if st.session_state.get("show_audit"):
+        with st.spinner("⏳ Собираю статистику по базе..."):
+            audit_text = audit_database(collection)
+        st.text_area(
+            "Результат аудита (скопируйте всё)",
+            value=audit_text,
+            height=400,
+            key="audit_output"
+        )
+        st.download_button(
+            "💾 Скачать audit.txt",
+            data=audit_text.encode("utf-8"),
+            file_name="audit.txt",
+            mime="text/plain",
+            key="audit_download"
+        )
+        if st.button("❌ Закрыть аудит", key="audit_close", use_container_width=True):
+            st.session_state.show_audit = False
             st.rerun()
 
 
@@ -1038,7 +1174,6 @@ with chat_container:
                 sources = msg.get("sources", [])
                 fragments = msg.get("fragments", [])
 
-                # ✅ Эмодзи-кнопки: PDF, Копировать, 👍, 👎
                 action_cols = st.columns([1, 1, 1, 1, 2])
 
                 with action_cols[0]:
@@ -1060,7 +1195,6 @@ with chat_container:
                     with st.popover("📋 Копировать", use_container_width=True):
                         st.code(msg["content"], language="markdown")
 
-                # ✅ 👍 зелёная кнопка
                 with action_cols[2]:
                     current_fb = st.session_state.feedback.get(q)
                     up_label = "👍" if current_fb != 1 else "✅👍"
@@ -1075,7 +1209,6 @@ with chat_container:
                         st.toast("👍 Спасибо! Учли.")
                         st.rerun()
 
-                # ✅ 👎 красная кнопка
                 with action_cols[3]:
                     down_label = "👎" if current_fb != 0 else "✅👎"
                     if st.button(
