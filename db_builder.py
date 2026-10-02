@@ -1,13 +1,15 @@
-# db_builder.py — ФИНАЛЬНАЯ версия
+# db_builder.py — ФИНАЛЬНАЯ версия (согласована с app.py)
 # Фиксы A (pending_table_refs), B (обрыв таблиц по ^N Название),
-# C (не наследовать chapter в табличных чанках)
-# Фикс D (поддержка СП 317: 4-уровневые пункты, таблицы с заголовком,
-#         подразделы как маркеры раздела, отключение парсинга в приложении)
+# C (не наследовать chapter в табличных чанках),
+# D (поддержка СП 317: 4-уровневые пункты, таблицы с заголовком,
+#    подразделы как маркеры раздела, отключение парсинга в приложении),
+# E (совместимость с app.py: build_database, DB_PATH, progress_callback,
+#    chapter_title / section_title / is_table в метаданных)
 
 import os
 import re
 import hashlib
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable
 
 import chromadb
 from sentence_transformers import SentenceTransformer
@@ -17,8 +19,10 @@ MIN_CHUNK_SIZE = 200
 MAX_CHUNK_SIZE = 1500
 MERGE_MIN_SIZE = 300
 
-CHROMA_PATH = "chroma_db"
+# ---- имена, которые ждёт app.py ----
+DB_PATH = "chroma_db"
 COLLECTION_NAME = "snip_norms"
+# ------------------------------------
 
 VALID_CHAPTER_RANGES = {
     "ГОСТ Р 51872-2024": (1, 5),
@@ -46,8 +50,13 @@ RE_TABLE = re.compile(r"^Таблица\s+(\d+(?:\.\d+)?)\s*(?:-.*)?$")
 
 RE_APPENDIX = re.compile(r"^Приложение\s+([А-ЯЁ])\s*$")
 
-# Маркеры конца приложения (библиография и т.п.)
+# Маркеры конца приложения
 RE_APPENDIX_END = re.compile(r"^(Библиография|УДК\s)")
+
+
+def _strip_title(rest: str) -> str:
+    """Заголовок раздела/подраздела без номера, в одну строку, без завершающих точек."""
+    return rest.strip().rstrip(".").strip()
 
 
 def is_inside_table_block(lines: List[str], idx: int) -> bool:
@@ -98,21 +107,21 @@ def make_chunk_id(source: str, idx: int, text: str) -> str:
 
 
 def parse_document(path: str) -> List[Dict]:
-    source = os.path.basename(path).replace(".txt", "")
+    source = os.path.basename(path).replace(".txt", "").strip()
     with open(path, "r", encoding="utf-8") as f:
         lines = [ln.rstrip() for ln in f.read().split("\n")]
 
-    # ФИКС A: pending_table_refs НЕ удаляем
     pending_table_refs: Dict[str, Dict[str, str]] = {}
 
     chunks: List[Dict] = []
     cur_chapter: Optional[int] = None
+    cur_chapter_title: str = ""
     cur_section: str = ""
+    cur_section_title: str = ""
     cur_point: str = ""
     cur_table: str = ""
     cur_appendix: str = ""
     in_table: bool = False
-    # ФИКС D: внутри приложения не парсим RE_POINT / RE_CHAPTER
     in_appendix_section: bool = False
 
     buffer: List[str] = []
@@ -126,9 +135,12 @@ def parse_document(path: str) -> List[Dict]:
                 "text": text[:MAX_CHUNK_SIZE],
                 "source": source,
                 "chapter": str(buffer_meta.get("chapter", "")),
+                "chapter_title": buffer_meta.get("chapter_title", ""),
                 "section": buffer_meta.get("section", ""),
+                "section_title": buffer_meta.get("section_title", ""),
                 "point": buffer_meta.get("point", ""),
                 "table_number": buffer_meta.get("table_number", ""),
+                "is_table": "1" if buffer_meta.get("table_number", "") else "0",
                 "appendix": buffer_meta.get("appendix", ""),
             })
         buffer = []
@@ -148,8 +160,6 @@ def parse_document(path: str) -> List[Dict]:
         # Конец приложения — по "Библиография" или "УДК"
         if in_appendix_section and RE_APPENDIX_END.match(stripped):
             in_appendix_section = False
-            # проваливаемся дальше по обычной логике
-            # (ниже строка просто уйдёт в buffer)
 
         if stripped == "":
             if buffer:
@@ -166,7 +176,9 @@ def parse_document(path: str) -> List[Dict]:
             in_appendix_section = True
             start_new_buffer({
                 "chapter": str(cur_chapter or ""),
+                "chapter_title": cur_chapter_title,
                 "section": cur_section,
+                "section_title": cur_section_title,
                 "point": cur_point,
                 "table_number": "",
                 "appendix": cur_appendix,
@@ -175,13 +187,14 @@ def parse_document(path: str) -> List[Dict]:
             i += 1
             continue
 
-        # ФИКС D: внутри приложения НЕ распознаём пункты и разделы —
-        # просто копим текст в текущий буфер.
+        # ФИКС D: внутри приложения НЕ распознаём пункты и разделы
         if in_appendix_section:
             if not buffer:
                 start_new_buffer({
                     "chapter": str(cur_chapter or ""),
+                    "chapter_title": cur_chapter_title,
                     "section": cur_section,
+                    "section_title": cur_section_title,
                     "point": cur_point,
                     "table_number": "",
                     "appendix": cur_appendix,
@@ -201,7 +214,9 @@ def parse_document(path: str) -> List[Dict]:
                 ref = pending_table_refs[tbl_num]
                 meta = {
                     "chapter": ref.get("chapter", str(cur_chapter or "")),
+                    "chapter_title": ref.get("chapter_title", cur_chapter_title),
                     "section": ref.get("section", cur_section),
+                    "section_title": ref.get("section_title", cur_section_title),
                     "point": ref.get("point", cur_point),
                     "table_number": tbl_num,
                     "appendix": cur_appendix,
@@ -209,7 +224,9 @@ def parse_document(path: str) -> List[Dict]:
             else:
                 meta = {
                     "chapter": str(cur_chapter or ""),
+                    "chapter_title": cur_chapter_title,
                     "section": cur_section,
+                    "section_title": cur_section_title,
                     "point": cur_point,
                     "table_number": tbl_num,
                     "appendix": cur_appendix,
@@ -234,7 +251,9 @@ def parse_document(path: str) -> List[Dict]:
 
             start_new_buffer({
                 "chapter": str(cur_chapter or ""),
+                "chapter_title": cur_chapter_title,
                 "section": cur_section,
+                "section_title": cur_section_title,
                 "point": cur_point,
                 "table_number": "",
                 "appendix": cur_appendix,
@@ -260,9 +279,7 @@ def parse_document(path: str) -> List[Dict]:
                 i += 1
                 continue
 
-            # Дополнительно: если следующая строка не похожа ни на пункт,
-            # ни на подраздел, ни на пустую — это не раздел, а строка
-            # внутри абзаца/таблицы (предисловие: "1 РАЗРАБОТАН ...").
+            # Дополнительно: следующая строка должна быть пунктом/подразделом
             if not is_real_chapter_start(lines, i):
                 buffer.append(stripped)
                 i += 1
@@ -270,14 +287,39 @@ def parse_document(path: str) -> List[Dict]:
 
             # Настоящий раздел
             cur_chapter = ch_num
+            cur_chapter_title = _strip_title(m_ch.group(2))
             cur_section = ""
+            cur_section_title = ""
             cur_point = ""
             cur_table = ""
             in_table = False
 
             start_new_buffer({
                 "chapter": str(cur_chapter),
+                "chapter_title": cur_chapter_title,
                 "section": "",
+                "section_title": "",
+                "point": "",
+                "table_number": "",
+                "appendix": cur_appendix,
+            })
+            buffer.append(stripped)
+            i += 1
+            continue
+
+        # Подраздел "N.M Название" (заголовок, не пункт)
+        m_sub = RE_SUBSECTION.match(stripped)
+        if m_sub and not RE_POINT.match(stripped):
+            sub_num = m_sub.group(1)
+            cur_section = sub_num
+            cur_section_title = _strip_title(stripped[m_sub.end():])
+            cur_point = ""
+
+            start_new_buffer({
+                "chapter": str(cur_chapter or ""),
+                "chapter_title": cur_chapter_title,
+                "section": cur_section,
+                "section_title": cur_section_title,
                 "point": "",
                 "table_number": "",
                 "appendix": cur_appendix,
@@ -294,7 +336,9 @@ def parse_document(path: str) -> List[Dict]:
             ref_num = ref_match.group(1)
             pending_table_refs[ref_num] = {
                 "chapter": str(cur_chapter or ""),
+                "chapter_title": cur_chapter_title,
                 "section": cur_section,
+                "section_title": cur_section_title,
                 "point": cur_point,
             }
 
@@ -304,7 +348,9 @@ def parse_document(path: str) -> List[Dict]:
                 ref = pending_table_refs.get(cur_table, {})
                 start_new_buffer({
                     "chapter": ref.get("chapter", ""),
+                    "chapter_title": ref.get("chapter_title", ""),
                     "section": ref.get("section", ""),
+                    "section_title": ref.get("section_title", ""),
                     "point": ref.get("point", ""),
                     "table_number": cur_table,
                     "appendix": cur_appendix,
@@ -312,7 +358,9 @@ def parse_document(path: str) -> List[Dict]:
             else:
                 start_new_buffer({
                     "chapter": str(cur_chapter or ""),
+                    "chapter_title": cur_chapter_title,
                     "section": cur_section,
+                    "section_title": cur_section_title,
                     "point": cur_point,
                     "table_number": "",
                     "appendix": cur_appendix,
@@ -346,6 +394,11 @@ def merge_short_chunks(chunks: List[Dict]) -> List[Dict]:
                     cur["point"] = nxt["point"]
                 if not cur["table_number"] and nxt["table_number"]:
                     cur["table_number"] = nxt["table_number"]
+                    cur["is_table"] = nxt.get("is_table", "0")
+                if not cur.get("chapter_title") and nxt.get("chapter_title"):
+                    cur["chapter_title"] = nxt["chapter_title"]
+                if not cur.get("section_title") and nxt.get("section_title"):
+                    cur["section_title"] = nxt["section_title"]
                 continue
         merged.append(cur)
         cur = dict(nxt)
@@ -353,10 +406,26 @@ def merge_short_chunks(chunks: List[Dict]) -> List[Dict]:
     return merged
 
 
-def build_db(documents_dir: str = "documents"):
-    print(f"Loading embedding model: {EMBEDDING_MODEL}")
+def build_database(
+    documents_dir: str = "documents",
+    progress_callback: Optional[Callable[[str], None]] = None,
+):
+    """Собирает ChromaDB-коллекцию из .txt в documents_dir.
+
+    Совместимо с app.py: принимает kwarg progress_callback(msg).
+    """
+    def report(msg: str):
+        print(msg)
+        if progress_callback:
+            try:
+                progress_callback(msg)
+            except Exception as e:
+                print(f"[progress_callback] error: {e}")
+
+    report(f"Loading embedding model: {EMBEDDING_MODEL}")
     model = SentenceTransformer(EMBEDDING_MODEL)
-    client = chromadb.PersistentClient(path=CHROMA_PATH)
+
+    client = chromadb.PersistentClient(path=DB_PATH)
     try:
         client.delete_collection(COLLECTION_NAME)
     except Exception:
@@ -365,18 +434,19 @@ def build_db(documents_dir: str = "documents"):
         name=COLLECTION_NAME,
         metadata={"hnsw:space": "cosine"},
     )
+
     all_chunks: List[Dict] = []
     for fname in sorted(os.listdir(documents_dir)):
         if not fname.endswith(".txt"):
             continue
         path = os.path.join(documents_dir, fname)
-        print(f"Parsing {fname} ...")
+        report(f"Parsing {fname} ...")
         doc_chunks = parse_document(path)
         doc_chunks = merge_short_chunks(doc_chunks)
-        print(f"  -> {len(doc_chunks)} chunks")
+        report(f"  -> {len(doc_chunks)} chunks")
         all_chunks.extend(doc_chunks)
 
-    print(f"Total chunks: {len(all_chunks)}")
+    report(f"Total chunks: {len(all_chunks)}")
     BATCH = 64
     for start in range(0, len(all_chunks), BATCH):
         batch = all_chunks[start:start + BATCH]
@@ -387,18 +457,25 @@ def build_db(documents_dir: str = "documents"):
         metadatas = [{
             "source": c["source"],
             "chapter": c["chapter"],
+            "chapter_title": c.get("chapter_title", ""),
             "section": c["section"],
+            "section_title": c.get("section_title", ""),
             "point": c["point"],
             "table_number": c["table_number"],
+            "is_table": c.get("is_table", "0"),
             "appendix": c["appendix"],
         } for c in batch]
         collection.add(
             ids=ids, documents=texts,
             embeddings=embeddings, metadatas=metadatas,
         )
-        print(f"  indexed {start + len(batch)}/{len(all_chunks)}")
-    print("Done.")
+        report(f"  indexed {start + len(batch)}/{len(all_chunks)}")
+    report("Done.")
+
+
+# Обратная совместимость (если где-то остался старый вызов build_db)
+build_db = build_database
 
 
 if __name__ == "__main__":
-    build_db()
+    build_database()
