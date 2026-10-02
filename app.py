@@ -23,6 +23,129 @@ st.set_page_config(
 )
 
 
+# ==================== АУДИТ БАЗЫ (временная диагностика) ====================
+
+def audit_database(collection):
+    """Возвращает текстовый отчёт о содержимом базы."""
+    lines = []
+
+    def out(s=""):
+        lines.append(str(s))
+
+    try:
+        all_meta = collection.get(include=["metadatas", "documents"])
+        sources = sorted(set(
+            m["source"] for m in all_meta["metadatas"] if m.get("source")
+        ))
+        out(f"Всего чанков: {len(all_meta['documents'])}")
+        out(f"Всего документов: {len(sources)}")
+        out("=" * 60)
+        out()
+
+        for src in sources:
+            try:
+                r = collection.get(
+                    where={"source": src},
+                    include=["metadatas", "documents"]
+                )
+            except Exception as e:
+                out(f"=== {src} === ОШИБКА: {e}")
+                out()
+                continue
+
+            metas = r["metadatas"]
+            docs = r["documents"]
+            n = len(docs)
+            if n == 0:
+                out(f"=== {src} === пусто")
+                out()
+                continue
+
+            chapters = sorted(set(
+                m.get("chapter", "") for m in metas if m.get("chapter")
+            ))
+            points = sorted(set(
+                m.get("point", "") for m in metas if m.get("point")
+            ))
+            tables = sorted(set(
+                m.get("table_number", "") for m in metas if m.get("table_number")
+            ))
+
+            no_chapter = sum(1 for m in metas if not m.get("chapter"))
+            no_point = sum(1 for m in metas if not m.get("point"))
+            short = sum(1 for d in docs if len(d) < 200)
+            no_digits = sum(1 for d in docs if not re.search(r"\d", d))
+            avg_len = sum(len(d) for d in docs) / n
+
+            out(f"=== {src} ({n} чанков) ===")
+            out(f"  Средняя длина: {avg_len:.0f}")
+            out(f"  Пустой chapter: {no_chapter}")
+            out(f"  Пустой point: {no_point}")
+            out(f"  <200 символов: {short}")
+            out(f"  Без цифр: {no_digits}")
+            out(f"  Разделы ({len(chapters)}): {chapters}")
+            out(f"  Пунктов ({len(points)}), примеры: {points[:30]}")
+            out(f"  Таблиц ({len(tables)}): {tables}")
+            out()
+
+            # Спец-проверка Таблицы 13 в СП 46
+            if "МОСТЫ И ТРУБЫ" in src.upper():
+                out("  >>> Проверка Таблицы 13 в СП 46:")
+                try:
+                    t13 = collection.get(
+                        where={"table_number": "13"},
+                        include=["metadatas", "documents"]
+                    )
+                    if t13.get("documents"):
+                        out(f"      Чанков с table_number=13: {len(t13['documents'])}")
+                        for k, d in enumerate(t13["documents"][:3], 1):
+                            meta = t13["metadatas"][k - 1]
+                            out(f"      Чанк {k} (длина {len(d)}): "
+                                f"chapter={meta.get('chapter')}, "
+                                f"section={meta.get('section')}, "
+                                f"point={meta.get('point')}")
+                            out(f"      {d[:400]}...")
+                            out()
+                    else:
+                        out("      ❌ Таблица 13 НЕ найдена по table_number=13")
+                except Exception as e:
+                    out(f"      Ошибка проверки: {e}")
+
+                for needle in ["продольной оси трубы",
+                               "уступов в рядах",
+                               "зазоров между секциями"]:
+                    out(f"  >>> Поиск по тексту '{needle}':")
+                    try:
+                        t = collection.get(
+                            where_document={"$contains": needle},
+                            include=["documents"]
+                        )
+                        if t.get("documents"):
+                            out(f"      Найдено: {len(t['documents'])}")
+                            for i, d in enumerate(t["documents"][:2], 1):
+                                out(f"      Чанк {i} (длина {len(d)}): {d[:200]}...")
+                        else:
+                            out("      ❌ НЕ найдено")
+                    except Exception as e:
+                        out(f"      Ошибка: {e}")
+                out()
+
+            # Спец-проверка разделов СП 126
+            if "126" in src:
+                out("  >>> Проверка разделов 1-10 в СП 126:")
+                for num in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]:
+                    cnt = sum(1 for m in metas if m.get("chapter") == num)
+                    out(f"      chapter={num}: {cnt} чанков")
+                out()
+
+    except Exception as e:
+        out(f"❌ Общая ошибка аудита: {e}")
+
+    return "\n".join(lines)
+
+
+# ==================== ЛОГИРОВАНИЕ ОЦЕНОК ====================
+
 FEEDBACK_WEBHOOK_URL = ""
 
 
@@ -397,6 +520,8 @@ if "pending_question" not in st.session_state:
     st.session_state.pending_question = ""
 if "input_version" not in st.session_state:
     st.session_state.input_version = 0
+if "show_audit" not in st.session_state:
+    st.session_state.show_audit = False
 
 
 with st.sidebar:
@@ -475,6 +600,33 @@ with st.sidebar:
             )
         if st.button("♻️ Сбросить оценки", key="reset_feedback_btn", use_container_width=True):
             st.session_state.feedback = {}
+            st.rerun()
+
+    # ==================== АУДИТ БАЗЫ ====================
+    st.markdown("---")
+    st.markdown("### 🛠️ Диагностика")
+    if st.button("🔍 Аудит базы", key="audit_btn", use_container_width=True):
+        st.session_state.show_audit = True
+        st.rerun()
+
+    if st.session_state.get("show_audit"):
+        with st.spinner("⏳ Собираю статистику по базе..."):
+            audit_text = audit_database(collection)
+        st.text_area(
+            "Результат аудита (скопируйте всё)",
+            value=audit_text,
+            height=400,
+            key="audit_output"
+        )
+        st.download_button(
+            "💾 Скачать audit.txt",
+            data=audit_text.encode("utf-8"),
+            file_name="audit.txt",
+            mime="text/plain",
+            key="audit_download"
+        )
+        if st.button("❌ Закрыть аудит", key="audit_close", use_container_width=True):
+            st.session_state.show_audit = False
             st.rerun()
 
 
