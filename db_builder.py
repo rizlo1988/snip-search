@@ -38,7 +38,6 @@ HEADER_PATTERNS = [
     re.compile(r'ИС «Техэксперт'),
     re.compile(r'^КонсультантПлюс: примечание'),
     re.compile(r'^\s*СП \d+\.\d+\.\d+\.\d+\.\d+$'),
-    # ✅ Фикс СП 126: служебные скобки после заголовков
     re.compile(r'^\((?:раздел|пункт|таблица|приложение)\s+\d', re.IGNORECASE),
     re.compile(r'^\(в ред\.', re.IGNORECASE),
     re.compile(r'^\(введен', re.IGNORECASE),
@@ -99,7 +98,6 @@ def looks_like_table_context(lines, i, window=6):
     start = max(0, i - window)
     end = min(len(lines), i + window)
     context = ' '.join(lines[start:end])
-
     number_lines = 0
     total_nonempty = 0
     for j in range(start, end):
@@ -109,23 +107,17 @@ def looks_like_table_context(lines, i, window=6):
         total_nonempty += 1
         if re.search(r'\d', stripped):
             number_lines += 1
-
     if total_nonempty == 0:
         return False
-
     number_ratio = number_lines / total_nonempty
     has_units = bool(re.search(
         r'\b(мм|см|кг|м|м/с|м/сут|‰|%|МПа|см²|м²|м³)\b', context
     ))
     has_columns = bool(re.search(r'\s{3,}', context))
-
     return number_ratio > 0.5 or (has_units and has_columns)
 
 
 def is_inside_table_block(lines, i, window=5):
-    """✅ Фикс A: надёжная проверка «мы внутри таблицы».
-    Смотрим 5 строк ДО позиции i. Если ≥3 строки содержат единицы измерения
-    или колонки (3+ пробела) — считаем, что мы внутри таблицы."""
     start = max(0, i - window)
     table_like = 0
     for j in range(start, i):
@@ -174,20 +166,14 @@ TRASH_TITLE_STARTS = (
 )
 
 BAD_CHAPTER_TITLE_PREFIXES = (
-    'Допускаемое соединение',
-    'Допускаемые соединения',
+    'Допускаемое соединение', 'Допускаемые соединения',
     'Устройство асфальтобетонного покрытия',
     'Инъецирование закрытых каналов',
-    'Допускаемые отклонения',
-    'Допускаемые значения',
-    'Предельные отклонения',
-    'Предельные значения',
-    'Нормальные прохождения',
-    'Нормальное прохождение',
-    'Операции по выпуску',
-    'Операцию по выпуску',
-    'Технические требования',
-    'Наименование отклонения',
+    'Допускаемые отклонения', 'Допускаемые значения',
+    'Предельные отклонения', 'Предельные значения',
+    'Нормальные прохождения', 'Нормальное прохождение',
+    'Операции по выпуску', 'Операцию по выпуску',
+    'Технические требования', 'Наименование отклонения',
     'Номинальный размер',
 )
 
@@ -243,13 +229,12 @@ def parse_document(text, filename):
     appendix_re = re.compile(r'^Приложение\s+([А-ЯA-Z])')
     title_re = re.compile(r'^[А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{4,100}$')
 
-    # ✅ Фикс B: ссылки на таблицы из текста
     table_ref_re = re.compile(
         r'(?:приведен[ыо]?\s+в\s+таблиц[аеы]|см\.\s*таблиц|по\s+таблиц|'
         r'в\s+таблиц[аеы])\s+([А-ЯA-Z]?\.?\d+(?:\.\d+)?[а-яa-z]?)',
         re.IGNORECASE
     )
-    pending_table_refs = {}  # {table_num: (chapter, chapter_title, section, section_title, point)}
+    pending_table_refs = {}
 
     current_chapter = ""
     current_chapter_title = ""
@@ -370,7 +355,7 @@ def parse_document(text, filename):
         in_table_context = looks_like_table_context(lines, i)
         inside_table = is_inside_table_block(lines, i)
 
-        # ---------- 0. Сбор ссылок на таблицы ----------
+        # ---------- 0. Ссылки на таблицы ----------
         m_ref = table_ref_re.search(stripped)
         if m_ref and current_point:
             ref_num = m_ref.group(1)
@@ -386,8 +371,6 @@ def parse_document(text, filename):
             flush_buffer()
             table_lines = [line]
             table_num = table_match.group(1)
-
-            # ✅ Фикс B: приоритет — контекст пункта, который сослался на таблицу
             override_ctx = None
             if table_num in pending_table_refs:
                 override_ctx = pending_table_refs.pop(table_num)
@@ -407,7 +390,6 @@ def parse_document(text, filename):
                 if table_re.match(next_stripped):
                     break
 
-                # ✅ Фикс A+C: обрываем только если явно НЕ внутри таблицы
                 inside_tbl = is_inside_table_block(lines, j)
                 if not inside_tbl:
                     if (re.match(r'^\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\s+[А-ЯЁ]',
@@ -416,15 +398,12 @@ def parse_document(text, filename):
                             and not in_appendix):
                         if not re.match(r'^\d+([.,]\d+)?\s*$', next_stripped):
                             break
-                    # ✅ Фикс C: НЕ обрываем таблицу по ^N Название,
-                    # если это выглядит как строка таблицы (числа, единицы, колонки)
                     if (chapter_full_re.match(next_stripped)
                             and not re.search(r'\s{3,}', next_stripped)
                             and not in_appendix):
-                        # дополнительная защита: если строка содержит единицы или
-                        # сильно похожа на строку таблицы — не обрываем
+                        # ✅ защита от обрыва таблицы на строке данных
                         if not re.search(
-                            r'\b(мм|см|кг|м|м/с|м/сут|‰|%|МПа|кгс|"
+                            r'\b(мм|см|кг|м|м/с|м/сут|‰|%|МПа|кгс|'
                             r'см²|м²|м³|\d+[,\.]\d+)\b',
                             next_stripped):
                             break
@@ -442,7 +421,6 @@ def parse_document(text, filename):
                 j += 1
 
             table_text = '\n'.join(table_lines).strip()
-
             current_chapter = saved_chapter
             current_chapter_title = saved_chapter_title
             current_section = saved_section
@@ -485,7 +463,6 @@ def parse_document(text, filename):
                 and not in_appendix
                 and is_valid_chapter_num(chapter_match.group(1), filename)):
             title = chapter_match.group(2).strip()
-            # ✅ Фикс C: если «мы внутри таблицы» — не считаем заголовком
             if is_plausible_chapter_title(title) and not in_table_context:
                 flush_buffer()
                 current_chapter = chapter_match.group(1)
