@@ -1,734 +1,404 @@
+# db_builder.py — ФИНАЛЬНАЯ версия
+# Фиксы A (pending_table_refs), B (обрыв таблиц по ^N Название),
+# C (не наследовать chapter в табличных чанках)
+# Фикс D (поддержка СП 317: 4-уровневые пункты, таблицы с заголовком,
+#         подразделы как маркеры раздела, отключение парсинга в приложении)
+
 import os
 import re
+import hashlib
+from typing import List, Dict, Optional
+
 import chromadb
-from chromadb.utils import embedding_functions
-
-
-DOCS_FOLDER = "documents"
-DB_PATH = "./chroma_db"
-COLLECTION_NAME = "snip_docs"
+from sentence_transformers import SentenceTransformer
 
 EMBEDDING_MODEL = "sergeyzh/rubert-mini-frida"
-
-MAX_CHUNK_SIZE = 1500
 MIN_CHUNK_SIZE = 200
-
-# ✅ Фикс 3: целевой минимум для склейки коротких чанков
+MAX_CHUNK_SIZE = 1500
 MERGE_MIN_SIZE = 300
 
-
-# ==================== ЧИСТКА КОЛОНТИТУЛОВ ====================
-
-HEADER_PATTERNS = [
-    re.compile(r'СП\s+\d+\.\d+\.\d+.*Актуализированная редакция'),
-    re.compile(r'Свод правил от \d+\.\d+\.\d+ N \d+'),
-    re.compile(r'^Страница \d+$'),
-    re.compile(r'Внимание! Документ включен'),
-    re.compile(r'ИС «Кодекс: \d поколение»'),
-    re.compile(r'Внимание! О порядке применения документа'),
-    re.compile(r'Внимание! Дополнительную информацию см\.'),
-    re.compile(r'Документ предоставлен КонсультантПлюс'),
-    re.compile(r'^\s*КонсультантПлюс:'),
-    re.compile(r'^СП \d+\.\d+\.\d+\.\d+$'),
-    re.compile(r'^ГОСТ Р \d+-\d+$'),
-    re.compile(r'^ГОСТ \d+-\d+$'),
-    re.compile(r'^Применяется с \d+\.\d+\.\d+'),
-    re.compile(r'^\d+$'),
-    re.compile(r'^ГОСТ Р 51872-2024'),
-    re.compile(r'^СП 34\.13330\.2021'),
-    re.compile(r'^СП 70\.13330\.2012 Несущие'),
-    re.compile(r'^СП 126\.13330\.2017'),
-    re.compile(r'ИС «Техэксперт'),
-    re.compile(r'^КонсультантПлюс: примечание'),
-    re.compile(r'^\s*СП \d+\.\d+\.\d+\.\d+\.\d+$'),
-    re.compile(r'^\((?:раздел|пункт|таблица|приложение)\s+\d', re.IGNORECASE),
-    re.compile(r'^\(в ред\.', re.IGNORECASE),
-    re.compile(r'^\(введен', re.IGNORECASE),
-    re.compile(r'^\(Измененная редакция', re.IGNORECASE),
-    re.compile(r'^\(Изменение', re.IGNORECASE),
-    re.compile(r'^\(Введен', re.IGNORECASE),
-    re.compile(r'^\(Исключен', re.IGNORECASE),
-]
-
-
-def is_header_line(line):
-    stripped = line.strip()
-    if not stripped:
-        return False
-    for pattern in HEADER_PATTERNS:
-        if pattern.search(stripped):
-            return True
-    return False
-
-
-def clean_text(text):
-    lines = text.split('\n')
-    cleaned = [line for line in lines if not is_header_line(line)]
-    return '\n'.join(cleaned)
-
-
-# ==================== БЕЛЫЙ СПИСОК ГЛАВ ====================
+CHROMA_PATH = "chroma_db"
+COLLECTION_NAME = "snip_norms"
 
 VALID_CHAPTER_RANGES = {
     "ГОСТ Р 51872-2024": (1, 5),
-    "СП 126.13330.2017": (1, 20),
-    "СП 34.13330.2021": (1, 18),
+    "СП 126.13330.2017": (1, 10),
+    "СП 34.13330.2021": (1, 7),
     "СП 46.13330.2012": (1, 14),
-    "СП 70.13330.2012": (1, 22),
-    "СП 78.13330.2012": (1, 16),
+    "СП 70.13330.2012": (1, 18),
+    "СП 78.13330.2012": (1, 7),
+    "СП 317.1325800.2017": (1, 8),
 }
 
+# Раздел: "5 Состав инженерно-геодезических изысканий. Общие технические требования"
+RE_CHAPTER = re.compile(r"^(\d{1,2})\s+([А-ЯЁ][^\n]{2,})$")
 
-def get_valid_chapter_range(filename):
-    for key, rng in VALID_CHAPTER_RANGES.items():
-        if key in filename:
-            return rng
-    return (1, 30)
+# Пункт: до 4 уровней вложенности ("5.3.1.4", "5.7.1.13")
+RE_POINT = re.compile(r"^(\d{1,2}(?:\.\d{1,2}){1,4})\s+(.*)$")
 
+# Подраздел: "5.1 Опорная геодезическая сеть" — маркер начала раздела
+RE_SUBSECTION = re.compile(r"^(\d{1,2}\.\d{1,2})\s+[А-ЯЁ]")
 
-def is_valid_chapter_num(chapter_num, filename):
-    try:
-        n = int(chapter_num)
-    except (ValueError, TypeError):
-        return False
-    lo, hi = get_valid_chapter_range(filename)
-    return lo <= n <= hi
+RE_SUBITEM = re.compile(r"^[а-яё]\)\s|^\d\)\s")
 
+# Таблица: "Таблица 5.1" или "Таблица 5.1 - Основные требования..."
+RE_TABLE = re.compile(r"^Таблица\s+(\d+(?:\.\d+)?)\s*(?:-.*)?$")
 
-# ==================== КОНТЕКСТ ТАБЛИЦЫ ====================
+RE_APPENDIX = re.compile(r"^Приложение\s+([А-ЯЁ])\s*$")
 
-UNIT_RE = re.compile(
-    r'\b(мм|см|кг|м|м/с|м/сут|‰|%|МПа|кгс|см²|м²|м³)\b'
-)
-NUM_RE = re.compile(r'\d+[,\.]\d+')
+# Маркеры конца приложения (библиография и т.п.)
+RE_APPENDIX_END = re.compile(r"^(Библиография|УДК\s)")
 
 
-def has_units_or_numbers(line):
-    """Строка содержит единицы измерения или числовые значения (типа 12,5)."""
-    return bool(UNIT_RE.search(line) or NUM_RE.search(line))
-
-
-def looks_like_table_context(lines, i, window=6):
-    start = max(0, i - window)
-    end = min(len(lines), i + window)
-    context = ' '.join(lines[start:end])
-    number_lines = 0
-    total_nonempty = 0
-    for j in range(start, end):
-        s = lines[j].strip()
-        if not s:
-            continue
-        total_nonempty += 1
-        if re.search(r'\d', s):
-            number_lines += 1
-    if total_nonempty == 0:
-        return False
-    number_ratio = number_lines / total_nonempty
-    has_units = bool(UNIT_RE.search(context))
-    has_columns = bool(re.search(r'\s{3,}', context))
-    return number_ratio > 0.5 or (has_units and has_columns)
-
-
-def is_inside_table_block(lines, i, window=5):
-    start = max(0, i - window)
-    table_like = 0
-    for j in range(start, i):
-        s = lines[j].strip()
-        if not s:
-            continue
-        if has_units_or_numbers(s) or re.search(r'\s{3,}', s):
-            table_like += 1
-    return table_like >= 3
-
-
-def next_lines_have_units(lines, i, lookahead=3):
-    """✅ Фикс 1: смотрим на 3 строки вперёд — есть ли там единицы/числа.
-    Если да — текущая строка, скорее всего, часть таблицы."""
-    end = min(len(lines), i + lookahead + 1)
-    for j in range(i, end):
-        s = lines[j].strip()
-        if not s:
-            continue
-        if has_units_or_numbers(s):
+def is_inside_table_block(lines: List[str], idx: int) -> bool:
+    lookback = min(15, idx)
+    for j in range(idx - 1, idx - 1 - lookback, -1):
+        if j < 0:
+            break
+        line = lines[j].strip()
+        if RE_TABLE.match(line):
             return True
+        if line == "" and j + 1 < len(lines):
+            nxt = lines[j + 1].strip()
+            if RE_POINT.match(nxt):
+                return False
     return False
 
 
-# ==================== ШАПКИ ТАБЛИЦ ====================
+def is_real_chapter_start(lines: List[str], idx: int) -> bool:
+    """ФИКС B + D: различаем настоящий раздел, строку таблицы и подраздел."""
+    if idx + 1 >= len(lines):
+        return True
 
-TABLE_HEADER_PATTERNS = [
-    re.compile(r'^Технические требования\s+Контроль\s+Способ контроля', re.IGNORECASE),
-    re.compile(r'^Технические требования\s+Контроль\s+Метод', re.IGNORECASE),
-    re.compile(r'^Допускаемые отклонения\s+Контроль\s+Способ', re.IGNORECASE),
-    re.compile(r'^Наименование\s+Контроль', re.IGNORECASE),
-    re.compile(r'^\s*Технические требования\s*$', re.IGNORECASE),
-    re.compile(r'^\s*Контроль\s+Способ\s+контроля\s*$', re.IGNORECASE),
-    re.compile(r'^\s*Контроль\s+Метод или способ\s*$', re.IGNORECASE),
-    re.compile(r'^\s*Значения технических требований', re.IGNORECASE),
-]
+    def looks_like_point_or_subsection(s: str) -> bool:
+        return bool(RE_POINT.match(s) or RE_SUBSECTION.match(s))
 
-
-def is_table_header_line(line):
-    stripped = line.strip()
-    if not stripped:
-        return False
-    for pattern in TABLE_HEADER_PATTERNS:
-        if pattern.search(stripped):
-            return True
-    return False
+    next_line = lines[idx + 1].strip()
+    if next_line != "":
+        return looks_like_point_or_subsection(next_line)
+    if idx + 2 >= len(lines):
+        return True
+    after_blank = lines[idx + 2].strip()
+    return looks_like_point_or_subsection(after_blank)
 
 
-# ==================== ПРОВЕРКА ЗАГОЛОВКОВ ====================
-
-TRASH_TITLE_STARTS = (
-    'Отклонение', 'Разность', 'Измерительный', 'То же',
-    'Допускаемые', 'Предельные', 'Наименьшие', 'Наибольшие',
-    'Не более', 'Не менее', 'Св.', 'Св ', 'Примечание',
-    'Значения', 'Величина', 'Параметр', 'Показатель',
-    'Первая', 'Вторая', 'Третья', 'Первый', 'Второй', 'Третий',
-    'До ', 'От ', 'Свыше', 'Менее', 'Более',
-)
-
-BAD_CHAPTER_TITLE_PREFIXES = (
-    'Допускаемое соединение', 'Допускаемые соединения',
-    'Устройство асфальтобетонного покрытия',
-    'Инъецирование закрытых каналов',
-    'Допускаемые отклонения', 'Допускаемые значения',
-    'Предельные отклонения', 'Предельные значения',
-    'Нормальные прохождения', 'Нормальное прохождение',
-    'Операции по выпуску', 'Операцию по выпуску',
-    'Технические требования', 'Наименование отклонения',
-    'Номинальный размер',
-)
+def extract_chapter_number(line: str) -> Optional[int]:
+    m = RE_CHAPTER.match(line.strip())
+    return int(m.group(1)) if m else None
 
 
-def is_plausible_chapter_title(title):
-    title = title.strip()
-    if len(title) < 5 or len(title) > 120:
-        return False
-    for trash in TRASH_TITLE_STARTS:
-        if title.startswith(trash):
-            return False
-    for prefix in BAD_CHAPTER_TITLE_PREFIXES:
-        if title.startswith(prefix):
-            return False
-    if re.match(r'^\d+\s*(мм|см|м|кг|%|‰|МПа|м/с)', title):
-        return False
-    if not re.match(r'^[А-ЯЁ]', title):
-        return False
-    digits = sum(c.isdigit() for c in title)
-    if digits > len(title) * 0.3:
-        return False
-    letters = sum(c.isalpha() for c in title)
-    if letters < len(title) * 0.5:
-        return False
-    return True
+def extract_table_number(line: str) -> Optional[str]:
+    m = RE_TABLE.match(line.strip())
+    return m.group(1) if m else None
 
 
-def is_plausible_section_title(title):
-    return is_plausible_chapter_title(title)
+def make_chunk_id(source: str, idx: int, text: str) -> str:
+    h = hashlib.md5(f"{source}|{idx}|{text[:80]}".encode("utf-8")).hexdigest()
+    return f"{source}_{idx}_{h[:8]}"
 
 
-# ==================== СКЛЕЙКА КОРОТКИХ ЧАНКОВ ====================
+def parse_document(path: str) -> List[Dict]:
+    source = os.path.basename(path).replace(".txt", "")
+    with open(path, "r", encoding="utf-8") as f:
+        lines = [ln.rstrip() for ln in f.read().split("\n")]
 
-def merge_short_chunks(chunks):
-    """✅ Фикс 3: склеиваем соседние чанки, если они короткие и
-    у них одинаковый source + chapter + chapter_title.
-    Таблицы НЕ склеиваем."""
-    if not chunks:
-        return chunks
+    # ФИКС A: pending_table_refs НЕ удаляем
+    pending_table_refs: Dict[str, Dict[str, str]] = {}
 
-    merged = []
-    buffer = None
+    chunks: List[Dict] = []
+    cur_chapter: Optional[int] = None
+    cur_section: str = ""
+    cur_point: str = ""
+    cur_table: str = ""
+    cur_appendix: str = ""
+    in_table: bool = False
+    # ФИКС D: внутри приложения не парсим RE_POINT / RE_CHAPTER
+    in_appendix_section: bool = False
 
-    def flush(buf):
-        if buf is not None and buf["text"].strip():
-            merged.append(buf)
+    buffer: List[str] = []
+    buffer_meta: Dict[str, str] = {}
 
-    for c in chunks:
-        if buffer is None:
-            buffer = c
-            continue
+    def flush_buffer():
+        nonlocal buffer, buffer_meta
+        text = "\n".join(buffer).strip()
+        if len(text) >= MIN_CHUNK_SIZE:
+            chunks.append({
+                "text": text[:MAX_CHUNK_SIZE],
+                "source": source,
+                "chapter": str(buffer_meta.get("chapter", "")),
+                "section": buffer_meta.get("section", ""),
+                "point": buffer_meta.get("point", ""),
+                "table_number": buffer_meta.get("table_number", ""),
+                "appendix": buffer_meta.get("appendix", ""),
+            })
+        buffer = []
+        buffer_meta = {}
 
-        same_ctx = (
-            buffer["source"] == c["source"]
-            and buffer["chapter"] == c["chapter"]
-            and buffer["chapter_title"] == c["chapter_title"]
-            and buffer["section"] == c["section"]
-        )
-        both_small = (
-            len(buffer["text"]) < MERGE_MIN_SIZE
-            and len(c["text"]) < MERGE_MIN_SIZE
-        )
-        not_table = (not buffer["is_table"]) and (not c["is_table"])
-
-        if same_ctx and both_small and not_table:
-            buffer = {
-                **buffer,
-                "text": buffer["text"] + "\n\n" + c["text"],
-                "point": c["point"] or buffer["point"],
-                "section": c["section"] or buffer["section"],
-                "section_title": c["section_title"] or buffer["section_title"],
-            }
-        else:
-            flush(buffer)
-            buffer = c
-
-    flush(buffer)
-    return merged
-
-
-# ==================== ПАРСИНГ ====================
-
-def parse_document(text, filename):
-    chunks = []
-
-    doc_type = "ГОСТ" if "ГОСТ" in filename.upper() else "СП"
-    doc_number_match = re.search(r'(\d+(?:\.\d+)*)', filename)
-    doc_number = doc_number_match.group(1) if doc_number_match else ""
-
-    lines = text.split('\n')
-    total_lines = len(lines)
-
-    chapter_full_re = re.compile(
-        r'^(\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{4,100})$'
-    )
-    chapter_number_only_re = re.compile(r'^(\d{1,2})$')
-    section_re = re.compile(
-        r'^(\d{1,2}\.\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{4,100})$'
-    )
-    point_re = re.compile(r'^(\d{1,2}(?:\.\d{1,2}){1,3})[\s\.]+')
-    table_re = re.compile(r'^Таблица\s+([А-ЯA-Z]?\.?\d+(?:\.\d+)?[а-яa-z]?)')
-    appendix_re = re.compile(r'^Приложение\s+([А-ЯA-Z])')
-    title_re = re.compile(r'^[А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{4,100}$')
-
-    table_ref_re = re.compile(
-        r'(?:приведен[ыо]?\s+в\s+таблиц[аеы]|см\.\s*таблиц|по\s+таблиц|'
-        r'в\s+таблиц[аеы])\s+([А-ЯA-Z]?\.?\d+(?:\.\d+)?[а-яa-z]?)',
-        re.IGNORECASE
-    )
-    pending_table_refs = {}
-
-    current_chapter = ""
-    current_chapter_title = ""
-    current_section = ""
-    current_section_title = ""
-    current_point = ""
-    current_buffer = []
-    in_appendix = False
-
-    pending_small = []
-    pending_small_meta = None
-
-    def make_chunk(chunk_text, is_table=False, table_num="",
-                   override_ctx=None):
-        if override_ctx:
-            ch, ch_t, sec, sec_t, pt = override_ctx
-        else:
-            ch = current_chapter
-            ch_t = current_chapter_title
-            sec = current_section
-            sec_t = current_section_title
-            pt = current_point
-        return {
-            "text": chunk_text,
-            "source": filename,
-            "doc_type": doc_type,
-            "doc_number": doc_number,
-            "chapter": ch,
-            "chapter_title": ch_t,
-            "section": sec,
-            "section_title": sec_t,
-            "point": pt,
-            "is_table": is_table,
-            "table_number": table_num,
-        }
-
-    def add_chunk(chunk_dict):
-        nonlocal pending_small, pending_small_meta
-        text = chunk_dict["text"].strip()
-        if not text:
-            return
-        if (len(text) < MIN_CHUNK_SIZE
-                and not chunk_dict["is_table"]
-                and not chunk_dict["table_number"]):
-            if pending_small_meta is None:
-                pending_small_meta = {
-                    k: chunk_dict[k] for k in (
-                        "source", "doc_type", "doc_number",
-                        "chapter", "chapter_title",
-                        "section", "section_title",
-                        "point",
-                    )
-                }
-            pending_small.append(text)
-            joined = "\n".join(pending_small)
-            if len(joined) >= MIN_CHUNK_SIZE:
-                merged = dict(pending_small_meta)
-                merged["text"] = joined
-                merged["is_table"] = False
-                merged["table_number"] = ""
-                chunks.append(merged)
-                pending_small = []
-                pending_small_meta = None
-            return
-
-        if pending_small:
-            joined = "\n".join(pending_small)
-            merged = dict(pending_small_meta)
-            merged["text"] = joined
-            merged["is_table"] = False
-            merged["table_number"] = ""
-            chunks.append(merged)
-            pending_small = []
-            pending_small_meta = None
-
-        chunks.append(chunk_dict)
-
-    def flush_small_pending():
-        nonlocal pending_small, pending_small_meta
-        if pending_small:
-            joined = "\n".join(pending_small)
-            if joined.strip():
-                merged = dict(pending_small_meta or {
-                    "source": filename, "doc_type": doc_type,
-                    "doc_number": doc_number,
-                    "chapter": "", "chapter_title": "",
-                    "section": "", "section_title": "",
-                    "point": "",
-                })
-                merged["text"] = joined
-                merged["is_table"] = False
-                merged["table_number"] = ""
-                chunks.append(merged)
-            pending_small = []
-            pending_small_meta = None
-
-    def flush_buffer(is_table=False, table_num=""):
-        nonlocal current_buffer
-        if not current_buffer:
-            return
-        chunk_text = '\n'.join(current_buffer).strip()
-        if not chunk_text:
-            current_buffer = []
-            return
-        if len(chunk_text) > MAX_CHUNK_SIZE:
-            for sub in split_large_chunk(chunk_text, MAX_CHUNK_SIZE):
-                add_chunk(make_chunk(sub, is_table, table_num))
-        else:
-            add_chunk(make_chunk(chunk_text, is_table, table_num))
-        current_buffer = []
+    def start_new_buffer(meta: Dict[str, str]):
+        nonlocal buffer, buffer_meta
+        flush_buffer()
+        buffer_meta = dict(meta)
 
     i = 0
-    while i < total_lines:
+    n = len(lines)
+    while i < n:
         line = lines[i]
         stripped = line.strip()
 
-        is_excluded = bool(re.search(r'\(Исключен[а]?,?\s', stripped))
-        in_table_context = looks_like_table_context(lines, i)
-        inside_table = is_inside_table_block(lines, i)
+        # Конец приложения — по "Библиография" или "УДК"
+        if in_appendix_section and RE_APPENDIX_END.match(stripped):
+            in_appendix_section = False
+            # проваливаемся дальше по обычной логике
+            # (ниже строка просто уйдёт в buffer)
 
-        # ---------- 0. Ссылки на таблицы ----------
-        m_ref = table_ref_re.search(stripped)
-        if m_ref and current_point:
-            ref_num = m_ref.group(1)
-            pending_table_refs[ref_num] = (
-                current_chapter, current_chapter_title,
-                current_section, current_section_title,
-                current_point,
-            )
-
-        # ---------- 1. Таблица ----------
-        table_match = table_re.match(stripped)
-        if table_match:
-            flush_buffer()
-            table_lines = [line]
-            table_num = table_match.group(1)
-            override_ctx = None
-            if table_num in pending_table_refs:
-                override_ctx = pending_table_refs.pop(table_num)
-
-            saved_chapter = current_chapter
-            saved_chapter_title = current_chapter_title
-            saved_section = current_section
-            saved_section_title = current_section_title
-            saved_point = current_point
-
-            j = i + 1
-            empty_count = 0
-            while j < total_lines:
-                next_line = lines[j]
-                next_stripped = next_line.strip()
-
-                # Новая таблица — стоп
-                if table_re.match(next_stripped):
-                    break
-
-                inside_tbl = is_inside_table_block(lines, j)
-
-                # ✅ Фикс 1: не обрываем по ^N.M Название и ^N Название,
-                # если мы внутри таблицы ИЛИ следующая строка / соседние
-                # строки содержат единицы измерения/числа.
-                if not inside_tbl:
-                    # Явный подраздел/пункт документа
-                    if (re.match(r'^\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\s+[А-ЯЁ]',
-                                 next_stripped)
-                            and not re.search(r'\s{3,}', next_stripped)
-                            and not in_appendix
-                            and not next_lines_have_units(lines, j)
-                            and not has_units_or_numbers(next_stripped)):
-                        if not re.match(r'^\d+([.,]\d+)?\s*$', next_stripped):
-                            break
-
-                    # Глава документа (^N Название) — обрываем только если
-                    # в самой строке и в следующих 3 строках нет единиц/чисел
-                    if (chapter_full_re.match(next_stripped)
-                            and not re.search(r'\s{3,}', next_stripped)
-                            and not in_appendix):
-                        if not has_units_or_numbers(next_stripped) \
-                                and not next_lines_have_units(lines, j):
-                            break
-
-                if not next_stripped:
-                    empty_count += 1
-                    if empty_count >= 5:
-                        break
-                    table_lines.append(next_line)
-                else:
-                    empty_count = 0
-                    table_lines.append(next_line)
-                    if len(table_lines) > 500:
-                        break
-                j += 1
-
-            table_text = '\n'.join(table_lines).strip()
-            current_chapter = saved_chapter
-            current_chapter_title = saved_chapter_title
-            current_section = saved_section
-            current_section_title = saved_section_title
-            current_point = saved_point
-
-            add_chunk(make_chunk(table_text, is_table=True,
-                                 table_num=table_num,
-                                 override_ctx=override_ctx))
-            i = j
-            continue
-
-        # ---------- 2. Двухстрочный раздел ----------
-        chapter_num_match = chapter_number_only_re.match(stripped)
-        if (chapter_num_match
-                and not in_table_context
-                and not inside_table
-                and not in_appendix
-                and is_valid_chapter_num(chapter_num_match.group(1), filename)):
-            j = i + 1
-            while j < total_lines and not lines[j].strip():
-                j += 1
-            if j < total_lines:
-                next_stripped = lines[j].strip()
-                if (title_re.match(next_stripped)
-                        and is_plausible_chapter_title(next_stripped)):
-                    flush_buffer()
-                    current_chapter = chapter_num_match.group(1)
-                    current_chapter_title = next_stripped
-                    current_section = ""
-                    current_section_title = ""
-                    current_point = ""
-                    i = j + 1
-                    continue
-
-        # ---------- 3. Однострочный раздел ----------
-        chapter_match = chapter_full_re.match(stripped)
-        if (chapter_match
-                and not inside_table
-                and not in_appendix
-                and is_valid_chapter_num(chapter_match.group(1), filename)):
-            title = chapter_match.group(2).strip()
-            if is_plausible_chapter_title(title) and not in_table_context:
-                flush_buffer()
-                current_chapter = chapter_match.group(1)
-                current_chapter_title = title
-                current_section = ""
-                current_section_title = ""
-                current_point = ""
-                i += 1
-                continue
-
-        # ---------- 4. Подраздел ----------
-        section_match = section_re.match(stripped)
-        if section_match and not inside_table and not in_appendix:
-            title = section_match.group(2).strip()
-            if is_plausible_section_title(title):
-                section_num = section_match.group(1)
-                section_chapter = section_num.split('.')[0]
-                if (current_chapter != section_chapter
-                        and is_valid_chapter_num(section_chapter, filename)):
-                    current_chapter = section_chapter
-                    current_chapter_title = ""
-                flush_buffer()
-                current_section = section_num
-                current_section_title = title
-                current_point = ""
-                i += 1
-                continue
-
-        # ---------- 5. Пункт ----------
-        point_match = point_re.match(stripped)
-        if (point_match
-                and not is_excluded
-                and not inside_table
-                and not in_appendix):
-            new_point = point_match.group(1)
-            point_chapter = new_point.split('.')[0]
-            if not is_valid_chapter_num(point_chapter, filename):
-                current_buffer.append(line)
-                i += 1
-                continue
-            if (current_chapter != point_chapter
-                    and is_valid_chapter_num(point_chapter, filename)
-                    and point_chapter.isdigit()):
-                current_chapter = point_chapter
-                current_chapter_title = ""
-            flush_buffer()
-            current_point = new_point
-            current_buffer.append(line)
+        if stripped == "":
+            if buffer:
+                buffer.append("")
             i += 1
             continue
 
-        # ---------- 6. Приложение ----------
-        appendix_match = appendix_re.match(stripped)
-        if appendix_match and not inside_table:
-            flush_buffer()
-            current_chapter = f"Приложение {appendix_match.group(1)}"
-            current_chapter_title = stripped
-            current_section = ""
-            current_section_title = ""
-            current_point = ""
-            in_appendix = True
+        # Приложение
+        m_app = RE_APPENDIX.match(stripped)
+        if m_app:
+            cur_appendix = m_app.group(1)
+            cur_table = ""
+            in_table = False
+            in_appendix_section = True
+            start_new_buffer({
+                "chapter": str(cur_chapter or ""),
+                "section": cur_section,
+                "point": cur_point,
+                "table_number": "",
+                "appendix": cur_appendix,
+            })
+            buffer.append(stripped)
             i += 1
             continue
 
-        if (in_appendix
-                and chapter_full_re.match(stripped)
-                and not inside_table):
-            in_appendix = False
+        # ФИКС D: внутри приложения НЕ распознаём пункты и разделы —
+        # просто копим текст в текущий буфер.
+        if in_appendix_section:
+            if not buffer:
+                start_new_buffer({
+                    "chapter": str(cur_chapter or ""),
+                    "section": cur_section,
+                    "point": cur_point,
+                    "table_number": "",
+                    "appendix": cur_appendix,
+                })
+            buffer.append(stripped)
+            i += 1
+            continue
 
-        # ---------- 7. Продолжение ----------
-        if current_buffer or current_point:
-            current_buffer.append(line)
-        elif stripped:
-            current_buffer.append(line)
+        # Таблица N (или "Таблица N - Заголовок")
+        m_tbl = RE_TABLE.match(stripped)
+        if m_tbl:
+            tbl_num = m_tbl.group(1)
+            cur_table = tbl_num
+            in_table = True
 
+            if tbl_num in pending_table_refs:
+                ref = pending_table_refs[tbl_num]
+                meta = {
+                    "chapter": ref.get("chapter", str(cur_chapter or "")),
+                    "section": ref.get("section", cur_section),
+                    "point": ref.get("point", cur_point),
+                    "table_number": tbl_num,
+                    "appendix": cur_appendix,
+                }
+            else:
+                meta = {
+                    "chapter": str(cur_chapter or ""),
+                    "section": cur_section,
+                    "point": cur_point,
+                    "table_number": tbl_num,
+                    "appendix": cur_appendix,
+                }
+
+            start_new_buffer(meta)
+            buffer.append(stripped)
+            i += 1
+            continue
+
+        # Пункт N.M[.K[.L]]
+        m_pt = RE_POINT.match(stripped)
+        if m_pt and not RE_SUBITEM.match(stripped):
+            point_num = m_pt.group(1)
+            parts = point_num.split(".")
+            cur_section = ".".join(parts[:2]) if len(parts) >= 2 else ""
+            cur_point = point_num
+
+            if in_table:
+                in_table = False
+                cur_table = ""
+
+            start_new_buffer({
+                "chapter": str(cur_chapter or ""),
+                "section": cur_section,
+                "point": cur_point,
+                "table_number": "",
+                "appendix": cur_appendix,
+            })
+            buffer.append(stripped)
+            i += 1
+            continue
+
+        # Раздел ^N Название
+        m_ch = RE_CHAPTER.match(stripped)
+        if m_ch:
+            ch_num = int(m_ch.group(1))
+
+            # ФИКС B: проверяем, настоящий ли это раздел
+            if in_table and not is_real_chapter_start(lines, i):
+                buffer.append(stripped)
+                i += 1
+                continue
+
+            valid_range = VALID_CHAPTER_RANGES.get(source)
+            if valid_range and not (valid_range[0] <= ch_num <= valid_range[1]):
+                buffer.append(stripped)
+                i += 1
+                continue
+
+            # Дополнительно: если следующая строка не похожа ни на пункт,
+            # ни на подраздел, ни на пустую — это не раздел, а строка
+            # внутри абзаца/таблицы (предисловие: "1 РАЗРАБОТАН ...").
+            if not is_real_chapter_start(lines, i):
+                buffer.append(stripped)
+                i += 1
+                continue
+
+            # Настоящий раздел
+            cur_chapter = ch_num
+            cur_section = ""
+            cur_point = ""
+            cur_table = ""
+            in_table = False
+
+            start_new_buffer({
+                "chapter": str(cur_chapter),
+                "section": "",
+                "point": "",
+                "table_number": "",
+                "appendix": cur_appendix,
+            })
+            buffer.append(stripped)
+            i += 1
+            continue
+
+        # Ссылка на таблицу в тексте
+        ref_match = re.search(
+            r"таблиц[аеыо][й]?\s+(\d+(?:\.\d+)?)", stripped, re.IGNORECASE
+        )
+        if ref_match and not in_table:
+            ref_num = ref_match.group(1)
+            pending_table_refs[ref_num] = {
+                "chapter": str(cur_chapter or ""),
+                "section": cur_section,
+                "point": cur_point,
+            }
+
+        # ФИКС C: внутри таблицы НЕ наследуем chapter от предыдущего раздела
+        if not buffer:
+            if in_table:
+                ref = pending_table_refs.get(cur_table, {})
+                start_new_buffer({
+                    "chapter": ref.get("chapter", ""),
+                    "section": ref.get("section", ""),
+                    "point": ref.get("point", ""),
+                    "table_number": cur_table,
+                    "appendix": cur_appendix,
+                })
+            else:
+                start_new_buffer({
+                    "chapter": str(cur_chapter or ""),
+                    "section": cur_section,
+                    "point": cur_point,
+                    "table_number": "",
+                    "appendix": cur_appendix,
+                })
+        buffer.append(stripped)
         i += 1
 
     flush_buffer()
-    flush_small_pending()
-
-    # ✅ Фикс 3: постобработка — склейка коротких соседних чанков
-    chunks = merge_short_chunks(chunks)
-
     return chunks
 
 
-def split_large_chunk(text, max_size):
-    parts = []
-    paragraphs = text.split('\n\n')
-    current = ""
-    for p in paragraphs:
-        if len(current) + len(p) + 2 <= max_size:
-            current += ("\n\n" if current else "") + p
-        else:
-            if current:
-                parts.append(current)
-            if len(p) > max_size:
-                sentences = re.split(r'(?<=[.!?])\s+', p)
-                sub = ""
-                for s in sentences:
-                    if len(sub) + len(s) + 1 <= max_size:
-                        sub += (" " if sub else "") + s
-                    else:
-                        if sub:
-                            parts.append(sub)
-                        sub = s
-                if sub:
-                    parts.append(sub)
-            else:
-                current = p
-    if current:
-        parts.append(current)
-    return parts
+def merge_short_chunks(chunks: List[Dict]) -> List[Dict]:
+    if not chunks:
+        return chunks
+    merged: List[Dict] = []
+    cur = dict(chunks[0])
+    for nxt in chunks[1:]:
+        same_ctx = (
+            cur["source"] == nxt["source"]
+            and cur["chapter"] == nxt["chapter"]
+            and cur["section"] == nxt["section"]
+            and cur["appendix"] == nxt["appendix"]
+        )
+        cur_short = len(cur["text"]) < MERGE_MIN_SIZE
+        nxt_short = len(nxt["text"]) < MERGE_MIN_SIZE
+        if same_ctx and (cur_short or nxt_short):
+            combined = cur["text"] + "\n" + nxt["text"]
+            if len(combined) <= MAX_CHUNK_SIZE:
+                cur["text"] = combined
+                if not cur["point"] and nxt["point"]:
+                    cur["point"] = nxt["point"]
+                if not cur["table_number"] and nxt["table_number"]:
+                    cur["table_number"] = nxt["table_number"]
+                continue
+        merged.append(cur)
+        cur = dict(nxt)
+    merged.append(cur)
+    return merged
 
 
-# ==================== СБОРКА ====================
-
-def build_database(progress_callback=None):
-    client = chromadb.PersistentClient(path=DB_PATH)
-
-    ru_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-        model_name=EMBEDDING_MODEL
-    )
-
+def build_db(documents_dir: str = "documents"):
+    print(f"Loading embedding model: {EMBEDDING_MODEL}")
+    model = SentenceTransformer(EMBEDDING_MODEL)
+    client = chromadb.PersistentClient(path=CHROMA_PATH)
     try:
-        client.delete_collection(name=COLLECTION_NAME)
-        if progress_callback:
-            progress_callback("Старая база удалена. Создаю новую...")
+        client.delete_collection(COLLECTION_NAME)
     except Exception:
-        if progress_callback:
-            progress_callback("Создаю новую базу...")
-
-    collection = client.get_or_create_collection(
+        pass
+    collection = client.create_collection(
         name=COLLECTION_NAME,
-        embedding_function=ru_ef
+        metadata={"hnsw:space": "cosine"},
     )
+    all_chunks: List[Dict] = []
+    for fname in sorted(os.listdir(documents_dir)):
+        if not fname.endswith(".txt"):
+            continue
+        path = os.path.join(documents_dir, fname)
+        print(f"Parsing {fname} ...")
+        doc_chunks = parse_document(path)
+        doc_chunks = merge_short_chunks(doc_chunks)
+        print(f"  -> {len(doc_chunks)} chunks")
+        all_chunks.extend(doc_chunks)
 
-    if not os.path.exists(DOCS_FOLDER):
-        raise FileNotFoundError(f"Папка '{DOCS_FOLDER}' не найдена!")
+    print(f"Total chunks: {len(all_chunks)}")
+    BATCH = 64
+    for start in range(0, len(all_chunks), BATCH):
+        batch = all_chunks[start:start + BATCH]
+        texts = [c["text"] for c in batch]
+        embeddings = model.encode(texts, normalize_embeddings=True).tolist()
+        ids = [make_chunk_id(c["source"], start + j, c["text"])
+               for j, c in enumerate(batch)]
+        metadatas = [{
+            "source": c["source"],
+            "chapter": c["chapter"],
+            "section": c["section"],
+            "point": c["point"],
+            "table_number": c["table_number"],
+            "appendix": c["appendix"],
+        } for c in batch]
+        collection.add(
+            ids=ids, documents=texts,
+            embeddings=embeddings, metadatas=metadatas,
+        )
+        print(f"  indexed {start + len(batch)}/{len(all_chunks)}")
+    print("Done.")
 
-    files = [f for f in os.listdir(DOCS_FOLDER) if f.endswith(".txt")]
-    if not files:
-        raise FileNotFoundError(f"В папке '{DOCS_FOLDER}' нет .txt файлов!")
 
-    if progress_callback:
-        progress_callback(f"Найдено документов: {len(files)}")
-
-    total_chunks = 0
-    for filename in files:
-        filepath = os.path.join(DOCS_FOLDER, filename)
-        with open(filepath, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        content = clean_text(content)
-        chunks = parse_document(content, filename)
-
-        if progress_callback:
-            progress_callback(f"  {filename}: разбит на {len(chunks)} чанков")
-
-        BATCH_SIZE = 100
-        for batch_start in range(0, len(chunks), BATCH_SIZE):
-            batch = chunks[batch_start:batch_start + BATCH_SIZE]
-            documents = [c["text"] for c in batch]
-            metadatas = [{
-                "source": c["source"],
-                "doc_type": c["doc_type"],
-                "doc_number": c["doc_number"],
-                "chapter": c["chapter"],
-                "chapter_title": c["chapter_title"],
-                "section": c["section"],
-                "section_title": c["section_title"],
-                "point": c["point"],
-                "is_table": c["is_table"],
-                "table_number": c["table_number"],
-            } for c in batch]
-            ids = [f"{filename}_{batch_start + i}" for i in range(len(batch))]
-
-            collection.add(
-                documents=documents,
-                metadatas=metadatas,
-                ids=ids
-            )
-            total_chunks += len(batch)
-
-    if progress_callback:
-        progress_callback(f"✅ База данных создана! Всего чанков: {total_chunks}")
-
-    return collection
+if __name__ == "__main__":
+    build_db()
