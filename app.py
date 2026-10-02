@@ -23,8 +23,6 @@ st.set_page_config(
 )
 
 
-# ==================== ЛОГИРОВАНИЕ ОЦЕНОК ====================
-
 FEEDBACK_WEBHOOK_URL = ""
 
 
@@ -37,7 +35,6 @@ def log_feedback(question, answer, rating, fragments_count=0):
         "fragments_count": fragments_count,
     }
     print(f"[FEEDBACK] {payload}")
-
     if FEEDBACK_WEBHOOK_URL:
         try:
             import urllib.request
@@ -89,38 +86,20 @@ st.markdown("""
         margin-bottom: 0.75rem;
     }
     [data-testid="stForm"] { border: none; padding: 0; }
-
     .top-clock {
-        position: fixed;
-        top: 12px;
-        left: 20px;
-        z-index: 999999;
+        position: fixed; top: 12px; left: 20px; z-index: 999999;
         background: var(--secondary-background-color);
         color: var(--text-color);
-        padding: 10px 18px;
-        border-radius: 10px;
+        padding: 10px 18px; border-radius: 10px;
         font-family: 'SF Mono', 'Consolas', 'Menlo', monospace;
         box-shadow: 0 2px 10px rgba(0,0,0,0.18);
         border: 1px solid rgba(128,128,128,0.2);
-        pointer-events: none;
-        white-space: nowrap;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
+        pointer-events: none; white-space: nowrap;
+        display: flex; flex-direction: column; align-items: center;
         line-height: 1.2;
     }
-    .top-clock .clock-date {
-        font-size: 0.95rem;
-        font-weight: 600;
-        opacity: 0.85;
-        color: var(--text-color);
-    }
-    .top-clock .clock-time {
-        font-size: 1.4rem;
-        font-weight: 700;
-        color: var(--primary-color);
-        letter-spacing: 1px;
-    }
+    .top-clock .clock-date { font-size: 0.95rem; font-weight: 600; opacity: 0.85; color: var(--text-color); }
+    .top-clock .clock-time { font-size: 1.4rem; font-weight: 700; color: var(--primary-color); letter-spacing: 1px; }
 
     @media (max-width: 768px) {
         .main-header { font-size: 1.3rem !important; line-height: 1.2; margin-bottom: 0.3rem; }
@@ -135,13 +114,7 @@ st.markdown("""
         .stExpander { margin-bottom: 0.5rem !important; }
         .stExpander summary { font-size: 0.9rem !important; }
         .db-status { font-size: 0.8rem; padding: 0.4rem 0.6rem; }
-
-        .top-clock {
-            top: 6px;
-            left: 8px;
-            padding: 6px 10px;
-            border-radius: 8px;
-        }
+        .top-clock { top: 6px; left: 8px; padding: 6px 10px; border-radius: 8px; }
         .top-clock .clock-date { font-size: 0.7rem; }
         .top-clock .clock-time { font-size: 1rem; letter-spacing: 0.5px; }
     }
@@ -149,27 +122,21 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ✅ Часы в левом верхнем углу
 import streamlit.components.v1 as components
 
 components.html("""
 <script>
 (function() {
     const parentDoc = window.parent.document;
-
     const old = parentDoc.querySelector('.top-clock');
     if (old) old.remove();
-
     const clock = parentDoc.createElement('div');
     clock.className = 'top-clock';
     clock.innerHTML = '<span class="clock-date"></span><span class="clock-time"></span>';
     parentDoc.body.appendChild(clock);
-
     const dateEl = clock.querySelector('.clock-date');
     const timeEl = clock.querySelector('.clock-time');
-
     function pad(n) { return n < 10 ? '0' + n : '' + n; }
-
     function tick() {
         const d = new Date();
         const dateStr = pad(d.getDate()) + '.' + pad(d.getMonth() + 1) + '.' + d.getFullYear();
@@ -177,7 +144,6 @@ components.html("""
         dateEl.textContent = dateStr;
         timeEl.textContent = timeStr;
     }
-
     tick();
     setInterval(tick, 1000);
 })();
@@ -199,7 +165,6 @@ def load_client():
 client = load_client()
 
 
-# ✅ Этап 3: reranker
 @st.cache_resource(show_spinner=False)
 def load_reranker():
     return CrossEncoder("BAAI/bge-reranker-base", max_length=512)
@@ -214,7 +179,6 @@ def load_collection():
             chroma_client.get_collection(name=COLLECTION_NAME)
         except Exception:
             need_build = True
-
     if need_build:
         with st.spinner("🔨 Первый запуск: собираю векторную базу. Это займёт 2-5 минут..."):
             progress_placeholder = st.empty()
@@ -222,7 +186,6 @@ def load_collection():
                 progress_placeholder.info(msg)
             build_database(progress_callback=show_progress)
             progress_placeholder.empty()
-
     chroma_client = chromadb.PersistentClient(path=DB_PATH)
     return chroma_client.get_collection(name=COLLECTION_NAME)
 
@@ -243,44 +206,31 @@ def count_sources():
 sources_list = count_sources()
 
 
-# ==================== RERANKER ====================
-
 def rerank_candidates(question, candidates, top_k=10):
-    """Прогоняет кандидатов через cross-encoder, возвращает топ-K."""
     if not candidates:
         return []
-
     try:
         reranker = load_reranker()
     except Exception as e:
-        print(f"[RERANK] не удалось загрузить reranker: {e}")
+        print(f"[RERANK] error: {e}")
         return candidates[:top_k]
-
-    # Ограничиваем длину текста — экономия памяти и скорости
     pairs = [(question, (c.get("text") or "")[:1500]) for c in candidates]
-
     try:
         scores = reranker.predict(pairs, batch_size=16, show_progress_bar=False)
     except Exception as e:
-        print(f"[RERANK] ошибка predict: {e}")
+        print(f"[RERANK] predict error: {e}")
         return candidates[:top_k]
-
     scored = list(zip(candidates, scores))
     scored.sort(key=lambda x: x[1], reverse=True)
     return [c for c, _ in scored[:top_k]]
 
 
-# ==================== ПОИСК ====================
-
 def gather_candidates(question, selected_sources, limit_vector=40):
-    """Собирает кандидатов из векторного поиска и поиска по таблицам."""
     candidates = []
-
     where_filter = None
     if selected_sources:
         where_filter = {"source": {"$in": selected_sources}}
 
-    # 1) Векторный поиск
     try:
         vector_results = collection.query(
             query_texts=[question],
@@ -305,7 +255,6 @@ def gather_candidates(question, selected_sources, limit_vector=40):
     except Exception:
         pass
 
-    # 2) Явное упоминание таблицы в вопросе
     table_matches = re.findall(
         r'таблиц[аы]?\s*([А-ЯA-Z]?\.?\d+(?:\.\d+)?)',
         question, re.IGNORECASE
@@ -336,7 +285,6 @@ def gather_candidates(question, selected_sources, limit_vector=40):
         except Exception:
             pass
 
-    # Дедупликация по тексту
     seen = set()
     unique = []
     for c in candidates:
@@ -344,26 +292,20 @@ def gather_candidates(question, selected_sources, limit_vector=40):
         if key not in seen:
             seen.add(key)
             unique.append(c)
-
     return unique
 
 
 def search_and_answer(question, selected_sources):
-    # 1. Собрать кандидатов
     candidates = gather_candidates(question, selected_sources)
-
     if not candidates:
         return (
             "В найденных фрагментах нет полного ответа по этому вопросу.",
-            [],
-            []
+            [], []
         )
 
-    # 2. Reranker: топ-50 → топ-10
     pre_top = candidates[:50]
     top = rerank_candidates(question, pre_top, top_k=10)
 
-    # 3. Формируем контекст
     context_parts = []
     sources_set = []
     for c in top:
@@ -384,7 +326,6 @@ def search_and_answer(question, selected_sources):
             ref_parts.append(f"пункт {c['point']}")
         if c.get('table_number'):
             ref_parts.append(f"Таблица {c['table_number']}")
-
         chunk_text = c['text'][:1500]
         ref = " · ".join(ref_parts)
         context_parts.append(f"\n\n--- Источник: {ref} ---\n{chunk_text}")
@@ -397,34 +338,14 @@ def search_and_answer(question, selected_sources):
 
 ВАЖНЫЕ ПРАВИЛА:
 1. Отвечай ТОЛЬКО на основе фрагментов ниже. Не выдумывай.
-2. КРИТИЧНО: Если во фрагментах НЕТ информации, напрямую отвечающей
-   на вопрос — ОБЯЗАТЕЛЬНО скажи:
-   «В найденных фрагментах нет полного ответа по теме "<вопрос>".
-    Найдены только косвенные упоминания.»
-   НЕ пересказывай нерелевантные фрагменты как ответ.
+2. Если во фрагментах НЕТ информации, прямо отвечающей на вопрос — скажи:
+   «В найденных фрагментах нет полного ответа по теме "<вопрос>"».
 3. Отвечай структурированно, по пунктам.
-4. ВАЖНО: Отвечай МАКСИМУМ 7 пунктами. Выбери ТОЛЬКО самые
-   релевантные фрагменты. Не перечисляй всё подряд.
-5. Не дублируй один и тот же фрагмент дважды.
-6. Если фрагмент — это строка таблицы, а не раздел документа — НЕ оформляй
-   его как «Раздел».
-7. КРИТИЧНО: Если фрагмент содержит ТОЛЬКО общую фразу без конкретных
-   чисел, допусков (±, мм, %) или названий — НЕ цитируй его вообще.
-   Примеры мусора: «Основные положения, допуски, отклонения и посадки»,
-   «Технические требования. Контроль. Способ контроля» — такие фразы
-   НЕ являются ответом.
+4. МАКСИМУМ 7 пунктов.
+5. Не дублируй фрагменты.
+6. Если фрагмент — это строка таблицы, не оформляй его как «Раздел».
 
-ОСОБОЕ ВНИМАНИЕ (если вопрос про допуски/отклонения):
-- Ищи ВСЕ виды допусков, а не только первый попавшийся:
-  * допуски на высотные отметки
-  * допуски на ширину (покрытия, слоя, конструкции)
-  * допуски на уклоны (продольные, поперечные)
-  * допуски на ровность
-  * допуски на толщину слоёв
-  * допуски на прямолинейность
-- В таблицах обычно перечислены ВСЕ допуски — проверь их.
-
-ФОРМАТ ОТВЕТА (для каждого требования):
+ФОРМАТ ОТВЕТА:
 - **Документ:** полное название
 - **Раздел:** номер и название
 - **Подраздел:** номер и название (если есть)
@@ -456,8 +377,7 @@ def search_and_answer(question, selected_sources):
             last_error = e
             err_str = str(e)
             if '429' in err_str or 'TooManyRequests' in err_str or 'rate limit' in err_str:
-                wait_time = 15 * (attempt + 1)
-                time.sleep(wait_time)
+                time.sleep(15 * (attempt + 1))
             else:
                 raise
     if response is None and last_error:
@@ -466,8 +386,6 @@ def search_and_answer(question, selected_sources):
     answer = response.choices[0].message.content
     return answer, sources_set, top
 
-
-# ==================== СЕССИЯ ====================
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -481,8 +399,6 @@ if "input_version" not in st.session_state:
     st.session_state.input_version = 0
 
 
-# ==================== САЙДБАР ====================
-
 with st.sidebar:
     st.markdown("### 🎯 Фильтр по документам")
     selected_sources = st.multiselect(
@@ -493,7 +409,6 @@ with st.sidebar:
         format_func=lambda x: x.replace(".txt", "")[:40] + "...",
         key="source_filter"
     )
-
     if selected_sources:
         st.caption(f"🔍 Поиск в **{len(selected_sources)}** документ(ах)")
     else:
@@ -541,7 +456,6 @@ with st.sidebar:
         ups = sum(1 for v in st.session_state.feedback.values() if v == 1)
         downs = sum(1 for v in st.session_state.feedback.values() if v == 0)
         total = ups + downs
-
         st.markdown(
             f'<div style="font-size:1.2rem; margin-bottom:0.4rem;">'
             f'<span style="color:#22c55e; font-weight:700;">👍 {ups}</span>'
@@ -550,35 +464,23 @@ with st.sidebar:
             f'</div>',
             unsafe_allow_html=True
         )
-
         if total > 0:
             quality = round(ups / total * 100)
-            if quality >= 70:
-                q_color = "#22c55e"
-            elif quality >= 40:
-                q_color = "#f59e0b"
-            else:
-                q_color = "#ef4444"
+            q_color = "#22c55e" if quality >= 70 else "#f59e0b" if quality >= 40 else "#ef4444"
             st.markdown(
                 f'<div style="font-size:0.85rem; opacity:0.8;">'
                 f'Качество: <span style="color:{q_color}; font-weight:700;">{quality}%</span> '
-                f'из {total} оценок'
-                f'</div>',
+                f'из {total} оценок</div>',
                 unsafe_allow_html=True
             )
-
         if st.button("♻️ Сбросить оценки", key="reset_feedback_btn", use_container_width=True):
             st.session_state.feedback = {}
             st.rerun()
 
 
-# ==================== ЗАГОЛОВОК ====================
-
 st.markdown('<h1 class="main-header" style="margin-top: 4.5rem;">📐 Поиск по СНиПам</h1>', unsafe_allow_html=True)
 st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
 
-
-# ==================== ВВОД ВОПРОСА ====================
 
 input_key = f"question_input_{st.session_state.input_version}"
 prefill_value = st.session_state.pending_question if st.session_state.pending_question else ""
@@ -598,34 +500,25 @@ with st.form("question_form", clear_on_submit=False):
         ask_clicked = st.form_submit_button("🔍", use_container_width=True, type="primary")
 
 
-# ==================== ОБРАБОТКА ВОПРОСА ====================
-
 user_input = None
 if ask_clicked and user_input_text.strip():
     user_input = user_input_text.strip()
 
 if user_input:
     st.session_state.messages = []
-
     if re.search(r'допуск|отклонени', user_input, re.IGNORECASE) and len(user_input.split()) < 4:
         st.info(
             "💡 Уточните: допуски на что?\n\n"
-            "Например:\n"
-            "- «допуски на высотные отметки»\n"
-            "- «допуски на ширину покрытия»\n"
-            "- «допуски на поперечный уклон»\n"
-            "- «допуски на ровность»"
+            "Например: «допуски на высотные отметки», "
+            "«допуски на ширину покрытия», «допуски на поперечный уклон»."
         )
-
     st.session_state.messages.append({"role": "user", "content": user_input})
-
     if user_input not in st.session_state.history:
         st.session_state.history.append(user_input)
 
     with st.spinner("⏳ Ищу ответ в документах…"):
         try:
             answer, sources, fragments = search_and_answer(user_input, selected_sources)
-
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": answer,
@@ -633,7 +526,6 @@ if user_input:
                 "sources": sources,
                 "fragments": fragments
             })
-
         except Exception as e:
             error_msg = f"Произошла ошибка: {e}"
             st.error(error_msg)
@@ -649,10 +541,7 @@ if user_input:
     st.rerun()
 
 
-# ==================== ЧАТ ====================
-
 chat_container = st.container()
-
 with chat_container:
     for idx, msg in enumerate(st.session_state.messages):
         if msg["role"] == "user":
@@ -661,13 +550,11 @@ with chat_container:
         else:
             with st.chat_message("assistant", avatar="📐"):
                 st.markdown(msg["content"])
-
                 q = msg.get("question", "")
                 sources = msg.get("sources", [])
                 fragments = msg.get("fragments", [])
 
                 action_cols = st.columns([1, 1, 1, 1, 2])
-
                 with action_cols[0]:
                     if IRONPRESS_OK:
                         try:
@@ -690,12 +577,8 @@ with chat_container:
                 with action_cols[2]:
                     current_fb = st.session_state.feedback.get(q)
                     up_label = "👍" if current_fb != 1 else "✅👍"
-                    if st.button(
-                        up_label,
-                        key=f"fb_up_{idx}_{hash(q)}",
-                        use_container_width=True,
-                        help="Ответ полезен",
-                    ):
+                    if st.button(up_label, key=f"fb_up_{idx}_{hash(q)}",
+                                 use_container_width=True, help="Ответ полезен"):
                         st.session_state.feedback[q] = 1
                         log_feedback(q, msg["content"], 1, len(fragments))
                         st.toast("👍 Спасибо! Учли.")
@@ -703,12 +586,8 @@ with chat_container:
 
                 with action_cols[3]:
                     down_label = "👎" if current_fb != 0 else "✅👎"
-                    if st.button(
-                        down_label,
-                        key=f"fb_down_{idx}_{hash(q)}",
-                        use_container_width=True,
-                        help="Ответ неточен",
-                    ):
+                    if st.button(down_label, key=f"fb_down_{idx}_{hash(q)}",
+                                 use_container_width=True, help="Ответ неточен"):
                         st.session_state.feedback[q] = 0
                         log_feedback(q, msg["content"], 0, len(fragments))
                         st.toast("👎 Учтём.")
@@ -725,22 +604,17 @@ with chat_container:
                             ref_parts = [c.get('source', '').replace('.txt', '')]
                             if c.get('chapter'):
                                 ch_title = c.get('chapter_title', '')
-                                if ch_title:
-                                    ref_parts.append(f"раздел {c['chapter']} «{ch_title}»")
-                                else:
-                                    ref_parts.append(f"раздел {c['chapter']}")
+                                ref_parts.append(f"раздел {c['chapter']} «{ch_title}»"
+                                                 if ch_title else f"раздел {c['chapter']}")
                             if c.get('section'):
                                 sec_title = c.get('section_title', '')
-                                if sec_title:
-                                    ref_parts.append(f"подраздел {c['section']} «{sec_title}»")
-                                else:
-                                    ref_parts.append(f"подраздел {c['section']}")
+                                ref_parts.append(f"подраздел {c['section']} «{sec_title}»"
+                                                 if sec_title else f"подраздел {c['section']}")
                             if c.get('point'):
                                 ref_parts.append(f"пункт {c['point']}")
                             if c.get('table_number'):
                                 ref_parts.append(f"Таблица {c['table_number']}")
                             ref = " · ".join(ref_parts)
-
                             st.markdown(f"**Фрагмент {i}** · тип: `{c.get('type', '')}`")
                             st.markdown(f'<div class="source-ref">📄 {ref}</div>', unsafe_allow_html=True)
                             st.markdown(f"> {c['text'][:1500]}")

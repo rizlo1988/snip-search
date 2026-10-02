@@ -8,11 +8,10 @@ DOCS_FOLDER = "documents"
 DB_PATH = "./chroma_db"
 COLLECTION_NAME = "snip_docs"
 
-# ✅ Этап 3: смена модели эмбеддингов
 EMBEDDING_MODEL = "sergeyzh/rubert-mini-frida"
 
 MAX_CHUNK_SIZE = 1500
-MIN_CHUNK_SIZE = 200  # ✅ было 100 — поднимаем, чтобы убрать обрубки
+MIN_CHUNK_SIZE = 200
 
 
 # ==================== ЧИСТКА КОЛОНТИТУЛОВ ====================
@@ -39,6 +38,14 @@ HEADER_PATTERNS = [
     re.compile(r'ИС «Техэксперт'),
     re.compile(r'^КонсультантПлюс: примечание'),
     re.compile(r'^\s*СП \d+\.\d+\.\d+\.\d+\.\d+$'),
+    # ✅ Фикс СП 126: служебные скобки после заголовков
+    re.compile(r'^\((?:раздел|пункт|таблица|приложение)\s+\d', re.IGNORECASE),
+    re.compile(r'^\(в ред\.', re.IGNORECASE),
+    re.compile(r'^\(введен', re.IGNORECASE),
+    re.compile(r'^\(Измененная редакция', re.IGNORECASE),
+    re.compile(r'^\(Изменение', re.IGNORECASE),
+    re.compile(r'^\(Введен', re.IGNORECASE),
+    re.compile(r'^\(Исключен', re.IGNORECASE),
 ]
 
 
@@ -58,17 +65,13 @@ def clean_text(text):
     return '\n'.join(cleaned)
 
 
-# ==================== БЕЛЫЙ СПИСОК ГЛАВ ПО ДОКУМЕНТАМ ====================
-# ✅ ФИКС проблемы 5: фантомные разделы.
-# Для каждого документа явно указываем допустимый диапазон глав.
-# Всё, что вне диапазона — не раздел, а строка таблицы / мусор.
+# ==================== БЕЛЫЙ СПИСОК ГЛАВ ====================
 
 VALID_CHAPTER_RANGES = {
-    # ключ ищется в filename
     "ГОСТ Р 51872-2024": (1, 5),
     "СП 126.13330.2017": (1, 20),
     "СП 34.13330.2021": (1, 18),
-    "СП 46.13330.2012": (1, 14),   # ✅ в СП 46 реально 14 глав
+    "СП 46.13330.2012": (1, 14),
     "СП 70.13330.2012": (1, 22),
     "СП 78.13330.2012": (1, 16),
 }
@@ -78,7 +81,7 @@ def get_valid_chapter_range(filename):
     for key, rng in VALID_CHAPTER_RANGES.items():
         if key in filename:
             return rng
-    return (1, 30)  # fallback
+    return (1, 30)
 
 
 def is_valid_chapter_num(chapter_num, filename):
@@ -119,9 +122,23 @@ def looks_like_table_context(lines, i, window=6):
     return number_ratio > 0.5 or (has_units and has_columns)
 
 
+def is_inside_table_block(lines, i, window=5):
+    """✅ Фикс A: надёжная проверка «мы внутри таблицы».
+    Смотрим 5 строк ДО позиции i. Если ≥3 строки содержат единицы измерения
+    или колонки (3+ пробела) — считаем, что мы внутри таблицы."""
+    start = max(0, i - window)
+    table_like = 0
+    for j in range(start, i):
+        s = lines[j].strip()
+        if not s:
+            continue
+        if (re.search(r'\b(мм|см|кг|м|м/с|м/сут|‰|%|МПа|см²|м²|м³)\b', s)
+                or re.search(r'\s{3,}', s)):
+            table_like += 1
+    return table_like >= 3
+
+
 # ==================== ШАПКИ ТАБЛИЦ ====================
-# ✅ ФИКС проблемы 1: шапки таблиц не выкидываем —
-# они часть содержимого таблицы. Но помечаем их отдельно.
 
 TABLE_HEADER_PATTERNS = [
     re.compile(r'^Технические требования\s+Контроль\s+Способ контроля', re.IGNORECASE),
@@ -145,7 +162,7 @@ def is_table_header_line(line):
     return False
 
 
-# ==================== ПРОВЕРКА "НАСТОЯЩИЙ ЛИ ЭТО ЗАГОЛОВОК" ====================
+# ==================== ПРОВЕРКА ЗАГОЛОВКОВ ====================
 
 TRASH_TITLE_STARTS = (
     'Отклонение', 'Разность', 'Измерительный', 'То же',
@@ -177,32 +194,24 @@ BAD_CHAPTER_TITLE_PREFIXES = (
 
 def is_plausible_chapter_title(title):
     title = title.strip()
-
     if len(title) < 5 or len(title) > 120:
         return False
-
     for trash in TRASH_TITLE_STARTS:
         if title.startswith(trash):
             return False
-
     for prefix in BAD_CHAPTER_TITLE_PREFIXES:
         if title.startswith(prefix):
             return False
-
     if re.match(r'^\d+\s*(мм|см|м|кг|%|‰|МПа|м/с)', title):
         return False
-
     if not re.match(r'^[А-ЯЁ]', title):
         return False
-
     digits = sum(c.isdigit() for c in title)
     if digits > len(title) * 0.3:
         return False
-
     letters = sum(c.isalpha() for c in title)
     if letters < len(title) * 0.5:
         return False
-
     return True
 
 
@@ -222,7 +231,6 @@ def parse_document(text, filename):
     lines = text.split('\n')
     total_lines = len(lines)
 
-    # Регулярки
     chapter_full_re = re.compile(
         r'^(\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{4,100})$'
     )
@@ -230,13 +238,19 @@ def parse_document(text, filename):
     section_re = re.compile(
         r'^(\d{1,2}\.\d{1,2})\s+([А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{4,100})$'
     )
-    # ✅ Этап 3: пункты могут быть X.Y.Z.W
     point_re = re.compile(r'^(\d{1,2}(?:\.\d{1,2}){1,3})[\s\.]+')
     table_re = re.compile(r'^Таблица\s+([А-ЯA-Z]?\.?\d+(?:\.\d+)?[а-яa-z]?)')
     appendix_re = re.compile(r'^Приложение\s+([А-ЯA-Z])')
     title_re = re.compile(r'^[А-ЯЁ][А-Яа-яЁё\s,\-\.\(\)]{4,100}$')
 
-    # Состояние
+    # ✅ Фикс B: ссылки на таблицы из текста
+    table_ref_re = re.compile(
+        r'(?:приведен[ыо]?\s+в\s+таблиц[аеы]|см\.\s*таблиц|по\s+таблиц|'
+        r'в\s+таблиц[аеы])\s+([А-ЯA-Z]?\.?\d+(?:\.\d+)?[а-яa-z]?)',
+        re.IGNORECASE
+    )
+    pending_table_refs = {}  # {table_num: (chapter, chapter_title, section, section_title, point)}
+
     current_chapter = ""
     current_chapter_title = ""
     current_section = ""
@@ -245,34 +259,38 @@ def parse_document(text, filename):
     current_buffer = []
     in_appendix = False
 
-    # ✅ ФИКС проблемы 2: буфер "мелких" чанков для склейки
-    pending_small = []          # [(chunk_dict), ...] — ждут склейки
-    pending_small_meta = None   # метаданные для склейки
+    pending_small = []
+    pending_small_meta = None
 
-    def make_chunk(chunk_text, is_table=False, table_num=""):
+    def make_chunk(chunk_text, is_table=False, table_num="",
+                   override_ctx=None):
+        if override_ctx:
+            ch, ch_t, sec, sec_t, pt = override_ctx
+        else:
+            ch = current_chapter
+            ch_t = current_chapter_title
+            sec = current_section
+            sec_t = current_section_title
+            pt = current_point
         return {
             "text": chunk_text,
             "source": filename,
             "doc_type": doc_type,
             "doc_number": doc_number,
-            "chapter": current_chapter,
-            "chapter_title": current_chapter_title,
-            "section": current_section,
-            "section_title": current_section_title,
-            "point": current_point,
+            "chapter": ch,
+            "chapter_title": ch_t,
+            "section": sec,
+            "section_title": sec_t,
+            "point": pt,
             "is_table": is_table,
             "table_number": table_num,
         }
 
     def add_chunk(chunk_dict):
-        """Добавляет чанк с учётом склейки мелких."""
         nonlocal pending_small, pending_small_meta
-
         text = chunk_dict["text"].strip()
         if not text:
             return
-
-        # Если это мелкий не-табличный чанк — в очередь на склейку
         if (len(text) < MIN_CHUNK_SIZE
                 and not chunk_dict["is_table"]
                 and not chunk_dict["table_number"]):
@@ -286,7 +304,6 @@ def parse_document(text, filename):
                     )
                 }
             pending_small.append(text)
-            # Если накопилось достаточно — склеиваем и добавляем
             joined = "\n".join(pending_small)
             if len(joined) >= MIN_CHUNK_SIZE:
                 merged = dict(pending_small_meta)
@@ -298,7 +315,6 @@ def parse_document(text, filename):
                 pending_small_meta = None
             return
 
-        # Крупный чанк — сначала сбрасываем накопленные мелкие
         if pending_small:
             joined = "\n".join(pending_small)
             merged = dict(pending_small_meta)
@@ -312,14 +328,12 @@ def parse_document(text, filename):
         chunks.append(chunk_dict)
 
     def flush_small_pending():
-        """Сброс накопленных мелких чанков в конце документа."""
         nonlocal pending_small, pending_small_meta
         if pending_small:
             joined = "\n".join(pending_small)
             if joined.strip():
                 merged = dict(pending_small_meta or {
-                    "source": filename,
-                    "doc_type": doc_type,
+                    "source": filename, "doc_type": doc_type,
                     "doc_number": doc_number,
                     "chapter": "", "chapter_title": "",
                     "section": "", "section_title": "",
@@ -340,13 +354,11 @@ def parse_document(text, filename):
         if not chunk_text:
             current_buffer = []
             return
-
         if len(chunk_text) > MAX_CHUNK_SIZE:
             for sub in split_large_chunk(chunk_text, MAX_CHUNK_SIZE):
                 add_chunk(make_chunk(sub, is_table, table_num))
         else:
             add_chunk(make_chunk(chunk_text, is_table, table_num))
-
         current_buffer = []
 
     i = 0
@@ -356,6 +368,17 @@ def parse_document(text, filename):
 
         is_excluded = bool(re.search(r'\(Исключен[а]?,?\s', stripped))
         in_table_context = looks_like_table_context(lines, i)
+        inside_table = is_inside_table_block(lines, i)
+
+        # ---------- 0. Сбор ссылок на таблицы ----------
+        m_ref = table_ref_re.search(stripped)
+        if m_ref and current_point:
+            ref_num = m_ref.group(1)
+            pending_table_refs[ref_num] = (
+                current_chapter, current_chapter_title,
+                current_section, current_section_title,
+                current_point,
+            )
 
         # ---------- 1. Таблица ----------
         table_match = table_re.match(stripped)
@@ -363,6 +386,11 @@ def parse_document(text, filename):
             flush_buffer()
             table_lines = [line]
             table_num = table_match.group(1)
+
+            # ✅ Фикс B: приоритет — контекст пункта, который сослался на таблицу
+            override_ctx = None
+            if table_num in pending_table_refs:
+                override_ctx = pending_table_refs.pop(table_num)
 
             saved_chapter = current_chapter
             saved_chapter_title = current_chapter_title
@@ -376,21 +404,30 @@ def parse_document(text, filename):
                 next_line = lines[j]
                 next_stripped = next_line.strip()
 
-                # Новая таблица — стоп
                 if table_re.match(next_stripped):
                     break
 
-                # ✅ ФИКС проблемы 1: таблицу НЕ прерываем по chapter_full_re.
-                # Прерываем только по явному подразделу/пункту документа,
-                # который стоит ВНЕ таблицы (без колонок).
-                if (re.match(r'^\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\s+[А-ЯЁ]',
-                             next_stripped)
-                        and not re.search(r'\s{3,}', next_stripped)
-                        and not in_appendix):
-                    # Дополнительная защита: если следующая строка —
-                    # просто числовая шапка таблицы, не прерываем
-                    if not re.match(r'^\d+([.,]\d+)?\s*$', next_stripped):
-                        break
+                # ✅ Фикс A+C: обрываем только если явно НЕ внутри таблицы
+                inside_tbl = is_inside_table_block(lines, j)
+                if not inside_tbl:
+                    if (re.match(r'^\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\s+[А-ЯЁ]',
+                                 next_stripped)
+                            and not re.search(r'\s{3,}', next_stripped)
+                            and not in_appendix):
+                        if not re.match(r'^\d+([.,]\d+)?\s*$', next_stripped):
+                            break
+                    # ✅ Фикс C: НЕ обрываем таблицу по ^N Название,
+                    # если это выглядит как строка таблицы (числа, единицы, колонки)
+                    if (chapter_full_re.match(next_stripped)
+                            and not re.search(r'\s{3,}', next_stripped)
+                            and not in_appendix):
+                        # дополнительная защита: если строка содержит единицы или
+                        # сильно похожа на строку таблицы — не обрываем
+                        if not re.search(
+                            r'\b(мм|см|кг|м|м/с|м/сут|‰|%|МПа|кгс|"
+                            r'см²|м²|м³|\d+[,\.]\d+)\b',
+                            next_stripped):
+                            break
 
                 if not next_stripped:
                     empty_count += 1
@@ -399,23 +436,22 @@ def parse_document(text, filename):
                     table_lines.append(next_line)
                 else:
                     empty_count = 0
-                    # ✅ ФИКС проблемы 1: шапки НЕ пропускаем,
-                    # а сохраняем как часть таблицы.
                     table_lines.append(next_line)
-                    if len(table_lines) > 400:
+                    if len(table_lines) > 500:
                         break
                 j += 1
 
             table_text = '\n'.join(table_lines).strip()
 
-            # Восстанавливаем контекст
             current_chapter = saved_chapter
             current_chapter_title = saved_chapter_title
             current_section = saved_section
             current_section_title = saved_section_title
             current_point = saved_point
 
-            add_chunk(make_chunk(table_text, is_table=True, table_num=table_num))
+            add_chunk(make_chunk(table_text, is_table=True,
+                                 table_num=table_num,
+                                 override_ctx=override_ctx))
             i = j
             continue
 
@@ -423,6 +459,7 @@ def parse_document(text, filename):
         chapter_num_match = chapter_number_only_re.match(stripped)
         if (chapter_num_match
                 and not in_table_context
+                and not inside_table
                 and not in_appendix
                 and is_valid_chapter_num(chapter_num_match.group(1), filename)):
             j = i + 1
@@ -444,11 +481,12 @@ def parse_document(text, filename):
         # ---------- 3. Однострочный раздел ----------
         chapter_match = chapter_full_re.match(stripped)
         if (chapter_match
-                and not in_table_context
+                and not inside_table
                 and not in_appendix
                 and is_valid_chapter_num(chapter_match.group(1), filename)):
             title = chapter_match.group(2).strip()
-            if is_plausible_chapter_title(title):
+            # ✅ Фикс C: если «мы внутри таблицы» — не считаем заголовком
+            if is_plausible_chapter_title(title) and not in_table_context:
                 flush_buffer()
                 current_chapter = chapter_match.group(1)
                 current_chapter_title = title
@@ -460,19 +498,15 @@ def parse_document(text, filename):
 
         # ---------- 4. Подраздел ----------
         section_match = section_re.match(stripped)
-        if section_match and not in_table_context and not in_appendix:
+        if section_match and not inside_table and not in_appendix:
             title = section_match.group(2).strip()
             if is_plausible_section_title(title):
                 section_num = section_match.group(1)
                 section_chapter = section_num.split('.')[0]
-
-                # ✅ ФИКС проблемы 5: не даём фантомным номерам
-                # перезаписывать chapter
                 if (current_chapter != section_chapter
                         and is_valid_chapter_num(section_chapter, filename)):
                     current_chapter = section_chapter
                     current_chapter_title = ""
-
                 flush_buffer()
                 current_section = section_num
                 current_section_title = title
@@ -484,28 +518,19 @@ def parse_document(text, filename):
         point_match = point_re.match(stripped)
         if (point_match
                 and not is_excluded
-                and not in_table_context
+                and not inside_table
                 and not in_appendix):
             new_point = point_match.group(1)
             point_chapter = new_point.split('.')[0]
-
-            # ✅ ФИКС проблемы 5: пункт из несуществующей главы
-            # не должен ломать chapter — просто идёт как текст
             if not is_valid_chapter_num(point_chapter, filename):
-                if current_buffer or current_point:
-                    current_buffer.append(line)
-                else:
-                    current_buffer.append(line)
+                current_buffer.append(line)
                 i += 1
                 continue
-
-            # Обновляем главу, если пункт указывает на новую
             if (current_chapter != point_chapter
                     and is_valid_chapter_num(point_chapter, filename)
                     and point_chapter.isdigit()):
                 current_chapter = point_chapter
                 current_chapter_title = ""
-
             flush_buffer()
             current_point = new_point
             current_buffer.append(line)
@@ -514,7 +539,7 @@ def parse_document(text, filename):
 
         # ---------- 6. Приложение ----------
         appendix_match = appendix_re.match(stripped)
-        if appendix_match and not in_table_context:
+        if appendix_match and not inside_table:
             flush_buffer()
             current_chapter = f"Приложение {appendix_match.group(1)}"
             current_chapter_title = stripped
@@ -527,7 +552,7 @@ def parse_document(text, filename):
 
         if (in_appendix
                 and chapter_full_re.match(stripped)
-                and not in_table_context):
+                and not inside_table):
             in_appendix = False
 
         # ---------- 7. Продолжение ----------
