@@ -13,6 +13,9 @@ EMBEDDING_MODEL = "sergeyzh/rubert-mini-frida"
 MAX_CHUNK_SIZE = 1500
 MIN_CHUNK_SIZE = 200
 
+# ✅ Фикс 3: целевой минимум для склейки коротких чанков
+MERGE_MIN_SIZE = 300
+
 
 # ==================== ЧИСТКА КОЛОНТИТУЛОВ ====================
 
@@ -94,6 +97,17 @@ def is_valid_chapter_num(chapter_num, filename):
 
 # ==================== КОНТЕКСТ ТАБЛИЦЫ ====================
 
+UNIT_RE = re.compile(
+    r'\b(мм|см|кг|м|м/с|м/сут|‰|%|МПа|кгс|см²|м²|м³)\b'
+)
+NUM_RE = re.compile(r'\d+[,\.]\d+')
+
+
+def has_units_or_numbers(line):
+    """Строка содержит единицы измерения или числовые значения (типа 12,5)."""
+    return bool(UNIT_RE.search(line) or NUM_RE.search(line))
+
+
 def looks_like_table_context(lines, i, window=6):
     start = max(0, i - window)
     end = min(len(lines), i + window)
@@ -101,18 +115,16 @@ def looks_like_table_context(lines, i, window=6):
     number_lines = 0
     total_nonempty = 0
     for j in range(start, end):
-        stripped = lines[j].strip()
-        if not stripped:
+        s = lines[j].strip()
+        if not s:
             continue
         total_nonempty += 1
-        if re.search(r'\d', stripped):
+        if re.search(r'\d', s):
             number_lines += 1
     if total_nonempty == 0:
         return False
     number_ratio = number_lines / total_nonempty
-    has_units = bool(re.search(
-        r'\b(мм|см|кг|м|м/с|м/сут|‰|%|МПа|см²|м²|м³)\b', context
-    ))
+    has_units = bool(UNIT_RE.search(context))
     has_columns = bool(re.search(r'\s{3,}', context))
     return number_ratio > 0.5 or (has_units and has_columns)
 
@@ -124,10 +136,22 @@ def is_inside_table_block(lines, i, window=5):
         s = lines[j].strip()
         if not s:
             continue
-        if (re.search(r'\b(мм|см|кг|м|м/с|м/сут|‰|%|МПа|см²|м²|м³)\b', s)
-                or re.search(r'\s{3,}', s)):
+        if has_units_or_numbers(s) or re.search(r'\s{3,}', s):
             table_like += 1
     return table_like >= 3
+
+
+def next_lines_have_units(lines, i, lookahead=3):
+    """✅ Фикс 1: смотрим на 3 строки вперёд — есть ли там единицы/числа.
+    Если да — текущая строка, скорее всего, часть таблицы."""
+    end = min(len(lines), i + lookahead + 1)
+    for j in range(i, end):
+        s = lines[j].strip()
+        if not s:
+            continue
+        if has_units_or_numbers(s):
+            return True
+    return False
 
 
 # ==================== ШАПКИ ТАБЛИЦ ====================
@@ -203,6 +227,55 @@ def is_plausible_chapter_title(title):
 
 def is_plausible_section_title(title):
     return is_plausible_chapter_title(title)
+
+
+# ==================== СКЛЕЙКА КОРОТКИХ ЧАНКОВ ====================
+
+def merge_short_chunks(chunks):
+    """✅ Фикс 3: склеиваем соседние чанки, если они короткие и
+    у них одинаковый source + chapter + chapter_title.
+    Таблицы НЕ склеиваем."""
+    if not chunks:
+        return chunks
+
+    merged = []
+    buffer = None
+
+    def flush(buf):
+        if buf is not None and buf["text"].strip():
+            merged.append(buf)
+
+    for c in chunks:
+        if buffer is None:
+            buffer = c
+            continue
+
+        same_ctx = (
+            buffer["source"] == c["source"]
+            and buffer["chapter"] == c["chapter"]
+            and buffer["chapter_title"] == c["chapter_title"]
+            and buffer["section"] == c["section"]
+        )
+        both_small = (
+            len(buffer["text"]) < MERGE_MIN_SIZE
+            and len(c["text"]) < MERGE_MIN_SIZE
+        )
+        not_table = (not buffer["is_table"]) and (not c["is_table"])
+
+        if same_ctx and both_small and not_table:
+            buffer = {
+                **buffer,
+                "text": buffer["text"] + "\n\n" + c["text"],
+                "point": c["point"] or buffer["point"],
+                "section": c["section"] or buffer["section"],
+                "section_title": c["section_title"] or buffer["section_title"],
+            }
+        else:
+            flush(buffer)
+            buffer = c
+
+    flush(buffer)
+    return merged
 
 
 # ==================== ПАРСИНГ ====================
@@ -387,25 +460,33 @@ def parse_document(text, filename):
                 next_line = lines[j]
                 next_stripped = next_line.strip()
 
+                # Новая таблица — стоп
                 if table_re.match(next_stripped):
                     break
 
                 inside_tbl = is_inside_table_block(lines, j)
+
+                # ✅ Фикс 1: не обрываем по ^N.M Название и ^N Название,
+                # если мы внутри таблицы ИЛИ следующая строка / соседние
+                # строки содержат единицы измерения/числа.
                 if not inside_tbl:
+                    # Явный подраздел/пункт документа
                     if (re.match(r'^\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\s+[А-ЯЁ]',
                                  next_stripped)
                             and not re.search(r'\s{3,}', next_stripped)
-                            and not in_appendix):
+                            and not in_appendix
+                            and not next_lines_have_units(lines, j)
+                            and not has_units_or_numbers(next_stripped)):
                         if not re.match(r'^\d+([.,]\d+)?\s*$', next_stripped):
                             break
+
+                    # Глава документа (^N Название) — обрываем только если
+                    # в самой строке и в следующих 3 строках нет единиц/чисел
                     if (chapter_full_re.match(next_stripped)
                             and not re.search(r'\s{3,}', next_stripped)
                             and not in_appendix):
-                        # ✅ защита от обрыва таблицы на строке данных
-                        if not re.search(
-                            r'\b(мм|см|кг|м|м/с|м/сут|‰|%|МПа|кгс|'
-                            r'см²|м²|м³|\d+[,\.]\d+)\b',
-                            next_stripped):
+                        if not has_units_or_numbers(next_stripped) \
+                                and not next_lines_have_units(lines, j):
                             break
 
                 if not next_stripped:
@@ -542,6 +623,10 @@ def parse_document(text, filename):
 
     flush_buffer()
     flush_small_pending()
+
+    # ✅ Фикс 3: постобработка — склейка коротких соседних чанков
+    chunks = merge_short_chunks(chunks)
+
     return chunks
 
 
