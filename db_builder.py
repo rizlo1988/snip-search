@@ -4,8 +4,9 @@
 # D (поддержка СП 317 и др.),
 # E (совместимость с app.py: build_database, DB_PATH, progress_callback,
 #    chapter_title / section_title / is_table в метаданных),
-# F (ужесточённый RE_CHAPTER, слабый is_real_chapter_start,
-#    отключение распознавания раздела/пункта внутри таблиц).
+# F (ужесточённый RE_CHAPTER, слабый is_real_chapter_start),
+# G (надёжный выход из in_table по RE_CHAPTER / RE_POINT после пустой;
+#    разбиение приложения по пустым строкам).
 
 import os
 import re
@@ -37,8 +38,6 @@ VALID_CHAPTER_RANGES = {
 
 # Раздел: "5 Состав инженерно-геодезических изысканий. Общие технические требования"
 # ВАЖНО: после номера — слово с заглавной буквы, затем строчная.
-# Это отсекает предисловия "1 РАЗРАБОТАН", "2 ИСПОЛНИТЕЛИ",
-# "3 ПОДГОТОВЛЕН", "4 УТВЕРЖДЕН", "5 ЗАРЕГИСТРИРОВАН" и т.п.
 RE_CHAPTER = re.compile(r"^(\d{1,2})\s+([А-ЯЁ][а-яё][^\n]{1,})$")
 
 # Пункт: до 4 уровней вложенности ("5.3.1.4", "5.7.1.13")
@@ -56,14 +55,11 @@ RE_APPENDIX_END = re.compile(r"^(Библиография|УДК\s)")
 
 
 def _strip_title(rest: str) -> str:
-    """Заголовок раздела/подраздела без номера, в одну строку, без завершающих точек."""
     return rest.strip().rstrip(".").strip()
 
 
 def is_real_chapter_start(lines: List[str], idx: int) -> bool:
-    """После ужесточения RE_CHAPTER (первые две буквы — Заглавная+строчная)
-    дополнительная проверка по следующей строке не нужна.
-    Оставлена для совместимости — всегда True."""
+    """Оставлена для совместимости — всегда True (RE_CHAPTER уже строгая)."""
     return True
 
 
@@ -166,7 +162,7 @@ def parse_document(path: str) -> List[Dict]:
             i += 1
             continue
 
-        # Внутри приложения НЕ распознаём пункты и разделы
+        # Внутри приложения — режем по пустым строкам (см. выше блок stripped == "")
         if in_appendix_section:
             if not buffer:
                 start_new_buffer(default_meta())
@@ -201,20 +197,18 @@ def parse_document(path: str) -> List[Dict]:
             i += 1
             continue
 
-        # ВНУТРИ ТАБЛИЦЫ — не распознаём RE_POINT / RE_CHAPTER.
-        # Копим всё в текущий буфер таблицы.
+        # ВНУТРИ ТАБЛИЦЫ
         if in_table:
-            # Признак конца таблицы: пустая строка ПЕРЕД этим местом +
-            # текущая строка НЕ похожа на строку таблицы (нет цифр и спецзнаков).
-            # Упрощённо: если после пустой строки идёт строка, матчащая RE_POINT,
-            # начинается новый пункт → таблица закончилась.
-            prev_is_blank = (i > 0 and lines[i - 1].strip() == "")
             m_pt = RE_POINT.match(stripped)
-            if prev_is_blank and m_pt and not RE_SUBITEM.match(stripped):
-                # конец таблицы: сбрасываем флаг и обрабатываем как пункт
+            m_ch = RE_CHAPTER.match(stripped)
+            prev_is_blank = (i > 0 and lines[i - 1].strip() == "")
+            # Таблица закончилась, если:
+            #  - новый заголовок раздела, ИЛИ
+            #  - пункт N.M[.K], идущий после пустой строки.
+            if m_ch or (m_pt and not RE_SUBITEM.match(stripped) and prev_is_blank):
                 in_table = False
                 cur_table = ""
-                # (не continue — проваливаемся в блок обработки пункта ниже)
+                # проваливаемся дальше — обработаем как обычную строку
             else:
                 if not buffer:
                     start_new_buffer(default_meta())
@@ -247,14 +241,12 @@ def parse_document(path: str) -> List[Dict]:
         m_ch = RE_CHAPTER.match(stripped)
         if m_ch:
             ch_num = int(m_ch.group(1))
-
             valid_range = VALID_CHAPTER_RANGES.get(source)
             if valid_range and not (valid_range[0] <= ch_num <= valid_range[1]):
                 buffer.append(stripped)
                 i += 1
                 continue
 
-            # Настоящий раздел
             cur_chapter = ch_num
             cur_chapter_title = _strip_title(m_ch.group(2))
             cur_section = ""
@@ -337,10 +329,6 @@ def build_database(
     documents_dir: str = "documents",
     progress_callback: Optional[Callable[[str], None]] = None,
 ):
-    """Собирает ChromaDB-коллекцию из .txt в documents_dir.
-
-    Совместимо с app.py: принимает kwarg progress_callback(msg).
-    """
     def report(msg: str):
         print(msg)
         if progress_callback:
@@ -400,7 +388,6 @@ def build_database(
     report("Done.")
 
 
-# Обратная совместимость (если где-то остался старый вызов build_db)
 build_db = build_database
 
 
