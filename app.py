@@ -6,7 +6,7 @@ import os
 import time
 from datetime import datetime
 from sentence_transformers import CrossEncoder
-from db_builder import build_database, DB_PATH, COLLECTION_NAME
+from db_builder import DB_PATH, COLLECTION_NAME
 
 try:
     import ironpress
@@ -14,14 +14,12 @@ try:
 except ImportError:
     IRONPRESS_OK = False
 
-
 st.set_page_config(
     page_title="Поиск по СНиПам",
     page_icon="📐",
     layout="wide",
     initial_sidebar_state="auto"
 )
-
 
 # ==================== АУДИТ БАЗЫ ====================
 
@@ -141,11 +139,9 @@ def audit_database(collection):
 
     return "\n".join(lines)
 
-
 # ==================== ЛОГИРОВАНИЕ ОЦЕНОК ====================
 
 FEEDBACK_WEBHOOK_URL = ""
-
 
 def log_feedback(question, answer, rating, fragments_count=0):
     payload = {
@@ -169,7 +165,6 @@ def log_feedback(question, answer, rating, fragments_count=0):
             urllib.request.urlopen(req, timeout=5)
         except Exception as e:
             print(f"[FEEDBACK] webhook error: {e}")
-
 
 st.markdown("""
 <style>
@@ -242,7 +237,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-
 import streamlit.components.v1 as components
 
 components.html("""
@@ -271,7 +265,6 @@ components.html("""
 </script>
 """, height=0)
 
-
 @st.cache_resource
 def load_client():
     api_key = st.secrets["CLOUD_API_KEY"]
@@ -282,38 +275,37 @@ def load_client():
         max_retries=2
     )
 
-
 client = load_client()
-
 
 @st.cache_resource(show_spinner=False)
 def load_reranker():
     return CrossEncoder("BAAI/bge-reranker-base", max_length=512)
 
-
 @st.cache_resource(show_spinner=False)
 def load_collection():
-    """ФОРСИРОВАННАЯ ПЕРЕСБОРКА при каждом старте приложения.
-
-    Не проверяем os.path.exists(DB_PATH) — иначе Streamlit Cloud может
-    поднять старую chroma_db от предыдущего запуска и не пересобрать базу.
-    build_database() сам удаляет старую коллекцию и создаёт новую.
+    """Читает ГОТОВУЮ chroma_db из репозитория.
+    Сборка делается вручную: python db_builder.py.
     """
-    with st.spinner("🔨 Собираю векторную базу. Это займёт 2-5 минут..."):
-        progress_placeholder = st.empty()
-
-        def show_progress(msg):
-            progress_placeholder.info(msg)
-
-        build_database(progress_callback=show_progress)
-        progress_placeholder.empty()
+    if not os.path.exists(DB_PATH):
+        st.error(
+            f"❌ База `{DB_PATH}` не найдена в репозитории.\n\n"
+            "Соберите её локально: `python db_builder.py`, "
+            "затем закоммитьте папку `chroma_db/` и запушьте в `main`."
+        )
+        st.stop()
 
     chroma_client = chromadb.PersistentClient(path=DB_PATH)
-    return chroma_client.get_collection(name=COLLECTION_NAME)
-
+    try:
+        return chroma_client.get_collection(name=COLLECTION_NAME)
+    except Exception as e:
+        st.error(
+            f"❌ Коллекция `{COLLECTION_NAME}` не найдена в `{DB_PATH}`.\n\n"
+            f"Ошибка: `{e}`\n\n"
+            "Пересоберите базу локально и закоммитьте `chroma_db/` заново."
+        )
+        st.stop()
 
 collection = load_collection()
-
 
 @st.cache_data
 def count_sources():
@@ -324,9 +316,7 @@ def count_sources():
     except Exception:
         return []
 
-
 sources_list = count_sources()
-
 
 def rerank_candidates(question, candidates, top_k=10):
     if not candidates:
@@ -345,7 +335,6 @@ def rerank_candidates(question, candidates, top_k=10):
     scored = list(zip(candidates, scores))
     scored.sort(key=lambda x: x[1], reverse=True)
     return [c for c, _ in scored[:top_k]]
-
 
 def gather_candidates(question, selected_sources, limit_vector=40):
     candidates = []
@@ -415,7 +404,6 @@ def gather_candidates(question, selected_sources, limit_vector=40):
             seen.add(key)
             unique.append(c)
     return unique
-
 
 def search_and_answer(question, selected_sources):
     candidates = gather_candidates(question, selected_sources)
@@ -508,7 +496,6 @@ def search_and_answer(question, selected_sources):
     answer = response.choices[0].message.content
     return answer, sources_set, top
 
-
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "history" not in st.session_state:
@@ -521,7 +508,6 @@ if "input_version" not in st.session_state:
     st.session_state.input_version = 0
 if "show_audit" not in st.session_state:
     st.session_state.show_audit = False
-
 
 with st.sidebar:
     st.markdown("### 🎯 Фильтр по документам")
@@ -583,7 +569,7 @@ with st.sidebar:
         st.markdown(
             f'<div style="font-size:1.2rem; margin-bottom:0.4rem;">'
             f'<span style="color:#22c55e; font-weight:700;">👍 {ups}</span>'
-            f'<span style="color:#888;"> &nbsp;·&nbsp; </span>'
+            f'<span style="color:#888;">  ·  </span>'
             f'<span style="color:#ef4444; font-weight:700;">👎 {downs}</span>'
             f'</div>',
             unsafe_allow_html=True
@@ -627,10 +613,8 @@ with st.sidebar:
             st.session_state.show_audit = False
             st.rerun()
 
-
 st.markdown('<h1 class="main-header" style="margin-top: 4.5rem;">📐 Поиск по СНиПам</h1>', unsafe_allow_html=True)
 st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
-
 
 input_key = f"question_input_{st.session_state.input_version}"
 prefill_value = st.session_state.pending_question if st.session_state.pending_question else ""
@@ -648,7 +632,6 @@ with st.form("question_form", clear_on_submit=False):
         )
     with input_cols[1]:
         ask_clicked = st.form_submit_button("🔍", use_container_width=True, type="primary")
-
 
 user_input = None
 if ask_clicked and user_input_text.strip():
@@ -689,7 +672,6 @@ if user_input:
 
     st.session_state.input_version += 1
     st.rerun()
-
 
 chat_container = st.container()
 with chat_container:
