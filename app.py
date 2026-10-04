@@ -23,7 +23,7 @@ st.set_page_config(
 )
 
 
-# ==================== АУДИТ БАЗЫ (временная диагностика) ====================
+# ==================== АУДИТ БАЗЫ ====================
 
 def audit_database(collection):
     """Возвращает текстовый отчёт о содержимом базы."""
@@ -88,7 +88,6 @@ def audit_database(collection):
             out(f"  Таблиц ({len(tables)}): {tables}")
             out()
 
-            # Спец-проверка Таблицы 13 в СП 46
             if "МОСТЫ И ТРУБЫ" in src.upper():
                 out("  >>> Проверка Таблицы 13 в СП 46:")
                 try:
@@ -130,7 +129,6 @@ def audit_database(collection):
                         out(f"      Ошибка: {e}")
                 out()
 
-            # Спец-проверка разделов СП 126
             if "126" in src:
                 out("  >>> Проверка разделов 1-10 в СП 126:")
                 for num in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]:
@@ -295,20 +293,21 @@ def load_reranker():
 
 @st.cache_resource(show_spinner=False)
 def load_collection():
-    need_build = not os.path.exists(DB_PATH)
-    if not need_build:
-        try:
-            chroma_client = chromadb.PersistentClient(path=DB_PATH)
-            chroma_client.get_collection(name=COLLECTION_NAME)
-        except Exception:
-            need_build = True
-    if need_build:
-        with st.spinner("🔨 Первый запуск: собираю векторную базу. Это займёт 2-5 минут..."):
-            progress_placeholder = st.empty()
-            def show_progress(msg):
-                progress_placeholder.info(msg)
-            build_database(progress_callback=show_progress)
-            progress_placeholder.empty()
+    """ФОРСИРОВАННАЯ ПЕРЕСБОРКА при каждом старте приложения.
+
+    Не проверяем os.path.exists(DB_PATH) — иначе Streamlit Cloud может
+    поднять старую chroma_db от предыдущего запуска и не пересобрать базу.
+    build_database() сам удаляет старую коллекцию и создаёт новую.
+    """
+    with st.spinner("🔨 Собираю векторную базу. Это займёт 2-5 минут..."):
+        progress_placeholder = st.empty()
+
+        def show_progress(msg):
+            progress_placeholder.info(msg)
+
+        build_database(progress_callback=show_progress)
+        progress_placeholder.empty()
+
     chroma_client = chromadb.PersistentClient(path=DB_PATH)
     return chroma_client.get_collection(name=COLLECTION_NAME)
 
@@ -602,7 +601,6 @@ with st.sidebar:
             st.session_state.feedback = {}
             st.rerun()
 
-    # ==================== АУДИТ БАЗЫ ====================
     st.markdown("---")
     st.markdown("### 🛠️ Диагностика")
     if st.button("🔍 Аудит базы", key="audit_btn", use_container_width=True):
