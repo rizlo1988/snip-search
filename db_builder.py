@@ -1,5 +1,5 @@
 # db_builder.py — ФИНАЛЬНАЯ версия
-# Фиксы A, B, C, D, E, F, G + H (жёсткая проверка RE_CHAPTER внутри таблицы)
+# Фиксы A, B, C, D, E, F, G, H (жёсткая проверка RE_CHAPTER внутри таблицы)
 
 import os
 import re
