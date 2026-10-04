@@ -1,5 +1,7 @@
 # db_builder.py — ФИНАЛЬНАЯ версия
-# Фиксы A, B, C, D, E, F, G, H (жёсткая проверка RE_CHAPTER внутри таблицы)
+# Фиксы A, B, C, D, E, F, G, H + I, J
+# I: убрано требование prev_is_blank для выхода из таблицы
+# J: VALID_CHAPTER_RANGES матчится по началу source (startswith)
 
 import os
 import re
@@ -33,6 +35,17 @@ RE_SUBITEM = re.compile(r"^[а-яё]\)\s|^\d\)\s")
 RE_TABLE = re.compile(r"^Таблица\s+(\d+(?:\.\d+)?)\s*(?:-.*)?$")
 RE_APPENDIX = re.compile(r"^Приложение\s+([А-ЯЁ])\s*$")
 RE_APPENDIX_END = re.compile(r"^(Библиография|УДК\s)")
+
+
+def get_valid_range(source: str):
+    """Возвращает (min, max) для документа или None.
+    Матчинг по началу строки: source = 'СП 46.13330.2012 Мосты и трубы',
+    ключ = 'СП 46.13330.2012' -> найден диапазон (1, 14).
+    """
+    for key, rng in VALID_CHAPTER_RANGES.items():
+        if source.startswith(key):
+            return rng
+    return None
 
 
 def _strip_title(rest: str) -> str:
@@ -179,16 +192,17 @@ def parse_document(path: str) -> List[Dict]:
         if in_table:
             m_pt = RE_POINT.match(stripped)
             m_ch = RE_CHAPTER.match(stripped)
-            prev_is_blank = (i > 0 and lines[i - 1].strip() == "")
 
+            # ФИКС I: убрано требование prev_is_blank.
+            # Глава или пункт выходят из таблицы независимо от пустой строки.
             ch_is_real = False
             if m_ch:
                 ch_num = int(m_ch.group(1))
-                valid_range = VALID_CHAPTER_RANGES.get(source)
+                valid_range = get_valid_range(source)
                 in_valid = (not valid_range) or (valid_range[0] <= ch_num <= valid_range[1])
-                ch_is_real = in_valid and prev_is_blank
+                ch_is_real = in_valid
 
-            if ch_is_real or (m_pt and not RE_SUBITEM.match(stripped) and prev_is_blank):
+            if ch_is_real or (m_pt and not RE_SUBITEM.match(stripped)):
                 in_table = False
                 cur_table = ""
             else:
@@ -223,7 +237,7 @@ def parse_document(path: str) -> List[Dict]:
         m_ch = RE_CHAPTER.match(stripped)
         if m_ch:
             ch_num = int(m_ch.group(1))
-            valid_range = VALID_CHAPTER_RANGES.get(source)
+            valid_range = get_valid_range(source)
             if valid_range and not (valid_range[0] <= ch_num <= valid_range[1]):
                 buffer.append(stripped)
                 i += 1
@@ -371,7 +385,6 @@ def build_database(
 
 
 build_db = build_database
-
 
 if __name__ == "__main__":
     build_database()
