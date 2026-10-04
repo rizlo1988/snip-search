@@ -1,10 +1,11 @@
 # db_builder.py — ФИНАЛЬНАЯ версия (согласована с app.py)
 # Фиксы A (pending_table_refs), B (обрыв таблиц по ^N Название),
 # C (не наследовать chapter в табличных чанках),
-# D (поддержка СП 317: 4-уровневые пункты, таблицы с заголовком,
-#    подразделы как маркеры раздела, отключение парсинга в приложении),
+# D (поддержка СП 317 и др.),
 # E (совместимость с app.py: build_database, DB_PATH, progress_callback,
-#    chapter_title / section_title / is_table в метаданных)
+#    chapter_title / section_title / is_table в метаданных),
+# F (ужесточённый RE_CHAPTER, слабый is_real_chapter_start,
+#    отключение распознавания раздела/пункта внутри таблиц).
 
 import os
 import re
@@ -35,13 +36,13 @@ VALID_CHAPTER_RANGES = {
 }
 
 # Раздел: "5 Состав инженерно-геодезических изысканий. Общие технические требования"
-RE_CHAPTER = re.compile(r"^(\d{1,2})\s+([А-ЯЁ][^\n]{2,})$")
+# ВАЖНО: после номера — слово с заглавной буквы, затем строчная.
+# Это отсекает предисловия "1 РАЗРАБОТАН", "2 ИСПОЛНИТЕЛИ",
+# "3 ПОДГОТОВЛЕН", "4 УТВЕРЖДЕН", "5 ЗАРЕГИСТРИРОВАН" и т.п.
+RE_CHAPTER = re.compile(r"^(\d{1,2})\s+([А-ЯЁ][а-яё][^\n]{1,})$")
 
 # Пункт: до 4 уровней вложенности ("5.3.1.4", "5.7.1.13")
 RE_POINT = re.compile(r"^(\d{1,2}(?:\.\d{1,2}){1,4})\s+(.*)$")
-
-# Подраздел: "5.1 Опорная геодезическая сеть" — маркер начала раздела
-RE_SUBSECTION = re.compile(r"^(\d{1,2}\.\d{1,2})\s+[А-ЯЁ]")
 
 RE_SUBITEM = re.compile(r"^[а-яё]\)\s|^\d\)\s")
 
@@ -59,36 +60,11 @@ def _strip_title(rest: str) -> str:
     return rest.strip().rstrip(".").strip()
 
 
-def is_inside_table_block(lines: List[str], idx: int) -> bool:
-    lookback = min(15, idx)
-    for j in range(idx - 1, idx - 1 - lookback, -1):
-        if j < 0:
-            break
-        line = lines[j].strip()
-        if RE_TABLE.match(line):
-            return True
-        if line == "" and j + 1 < len(lines):
-            nxt = lines[j + 1].strip()
-            if RE_POINT.match(nxt):
-                return False
-    return False
-
-
 def is_real_chapter_start(lines: List[str], idx: int) -> bool:
-    """ФИКС B + D: различаем настоящий раздел, строку таблицы и подраздел."""
-    if idx + 1 >= len(lines):
-        return True
-
-    def looks_like_point_or_subsection(s: str) -> bool:
-        return bool(RE_POINT.match(s) or RE_SUBSECTION.match(s))
-
-    next_line = lines[idx + 1].strip()
-    if next_line != "":
-        return looks_like_point_or_subsection(next_line)
-    if idx + 2 >= len(lines):
-        return True
-    after_blank = lines[idx + 2].strip()
-    return looks_like_point_or_subsection(after_blank)
+    """После ужесточения RE_CHAPTER (первые две буквы — Заглавная+строчная)
+    дополнительная проверка по следующей строке не нужна.
+    Оставлена для совместимости — всегда True."""
+    return True
 
 
 def extract_chapter_number(line: str) -> Optional[int]:
@@ -151,6 +127,17 @@ def parse_document(path: str) -> List[Dict]:
         flush_buffer()
         buffer_meta = dict(meta)
 
+    def default_meta():
+        return {
+            "chapter": str(cur_chapter or ""),
+            "chapter_title": cur_chapter_title,
+            "section": cur_section,
+            "section_title": cur_section_title,
+            "point": cur_point,
+            "table_number": "",
+            "appendix": cur_appendix,
+        }
+
     i = 0
     n = len(lines)
     while i < n:
@@ -174,31 +161,15 @@ def parse_document(path: str) -> List[Dict]:
             cur_table = ""
             in_table = False
             in_appendix_section = True
-            start_new_buffer({
-                "chapter": str(cur_chapter or ""),
-                "chapter_title": cur_chapter_title,
-                "section": cur_section,
-                "section_title": cur_section_title,
-                "point": cur_point,
-                "table_number": "",
-                "appendix": cur_appendix,
-            })
+            start_new_buffer(default_meta())
             buffer.append(stripped)
             i += 1
             continue
 
-        # ФИКС D: внутри приложения НЕ распознаём пункты и разделы
+        # Внутри приложения НЕ распознаём пункты и разделы
         if in_appendix_section:
             if not buffer:
-                start_new_buffer({
-                    "chapter": str(cur_chapter or ""),
-                    "chapter_title": cur_chapter_title,
-                    "section": cur_section,
-                    "section_title": cur_section_title,
-                    "point": cur_point,
-                    "table_number": "",
-                    "appendix": cur_appendix,
-                })
+                start_new_buffer(default_meta())
             buffer.append(stripped)
             i += 1
             continue
@@ -222,20 +193,34 @@ def parse_document(path: str) -> List[Dict]:
                     "appendix": cur_appendix,
                 }
             else:
-                meta = {
-                    "chapter": str(cur_chapter or ""),
-                    "chapter_title": cur_chapter_title,
-                    "section": cur_section,
-                    "section_title": cur_section_title,
-                    "point": cur_point,
-                    "table_number": tbl_num,
-                    "appendix": cur_appendix,
-                }
+                meta = default_meta()
+                meta["table_number"] = tbl_num
 
             start_new_buffer(meta)
             buffer.append(stripped)
             i += 1
             continue
+
+        # ВНУТРИ ТАБЛИЦЫ — не распознаём RE_POINT / RE_CHAPTER.
+        # Копим всё в текущий буфер таблицы.
+        if in_table:
+            # Признак конца таблицы: пустая строка ПЕРЕД этим местом +
+            # текущая строка НЕ похожа на строку таблицы (нет цифр и спецзнаков).
+            # Упрощённо: если после пустой строки идёт строка, матчащая RE_POINT,
+            # начинается новый пункт → таблица закончилась.
+            prev_is_blank = (i > 0 and lines[i - 1].strip() == "")
+            m_pt = RE_POINT.match(stripped)
+            if prev_is_blank and m_pt and not RE_SUBITEM.match(stripped):
+                # конец таблицы: сбрасываем флаг и обрабатываем как пункт
+                in_table = False
+                cur_table = ""
+                # (не continue — проваливаемся в блок обработки пункта ниже)
+            else:
+                if not buffer:
+                    start_new_buffer(default_meta())
+                buffer.append(stripped)
+                i += 1
+                continue
 
         # Пункт N.M[.K[.L]]
         m_pt = RE_POINT.match(stripped)
@@ -244,10 +229,6 @@ def parse_document(path: str) -> List[Dict]:
             parts = point_num.split(".")
             cur_section = ".".join(parts[:2]) if len(parts) >= 2 else ""
             cur_point = point_num
-
-            if in_table:
-                in_table = False
-                cur_table = ""
 
             start_new_buffer({
                 "chapter": str(cur_chapter or ""),
@@ -267,20 +248,8 @@ def parse_document(path: str) -> List[Dict]:
         if m_ch:
             ch_num = int(m_ch.group(1))
 
-            # ФИКС B: проверяем, настоящий ли это раздел
-            if in_table and not is_real_chapter_start(lines, i):
-                buffer.append(stripped)
-                i += 1
-                continue
-
             valid_range = VALID_CHAPTER_RANGES.get(source)
             if valid_range and not (valid_range[0] <= ch_num <= valid_range[1]):
-                buffer.append(stripped)
-                i += 1
-                continue
-
-            # Дополнительно: следующая строка должна быть пунктом/подразделом
-            if not is_real_chapter_start(lines, i):
                 buffer.append(stripped)
                 i += 1
                 continue
@@ -307,27 +276,6 @@ def parse_document(path: str) -> List[Dict]:
             i += 1
             continue
 
-        # Подраздел "N.M Название" (заголовок, не пункт)
-        m_sub = RE_SUBSECTION.match(stripped)
-        if m_sub and not RE_POINT.match(stripped):
-            sub_num = m_sub.group(1)
-            cur_section = sub_num
-            cur_section_title = _strip_title(stripped[m_sub.end():])
-            cur_point = ""
-
-            start_new_buffer({
-                "chapter": str(cur_chapter or ""),
-                "chapter_title": cur_chapter_title,
-                "section": cur_section,
-                "section_title": cur_section_title,
-                "point": "",
-                "table_number": "",
-                "appendix": cur_appendix,
-            })
-            buffer.append(stripped)
-            i += 1
-            continue
-
         # Ссылка на таблицу в тексте
         ref_match = re.search(
             r"таблиц[аеыо][й]?\s+(\d+(?:\.\d+)?)", stripped, re.IGNORECASE
@@ -342,29 +290,8 @@ def parse_document(path: str) -> List[Dict]:
                 "point": cur_point,
             }
 
-        # ФИКС C: внутри таблицы НЕ наследуем chapter от предыдущего раздела
         if not buffer:
-            if in_table:
-                ref = pending_table_refs.get(cur_table, {})
-                start_new_buffer({
-                    "chapter": ref.get("chapter", ""),
-                    "chapter_title": ref.get("chapter_title", ""),
-                    "section": ref.get("section", ""),
-                    "section_title": ref.get("section_title", ""),
-                    "point": ref.get("point", ""),
-                    "table_number": cur_table,
-                    "appendix": cur_appendix,
-                })
-            else:
-                start_new_buffer({
-                    "chapter": str(cur_chapter or ""),
-                    "chapter_title": cur_chapter_title,
-                    "section": cur_section,
-                    "section_title": cur_section_title,
-                    "point": cur_point,
-                    "table_number": "",
-                    "appendix": cur_appendix,
-                })
+            start_new_buffer(default_meta())
         buffer.append(stripped)
         i += 1
 
