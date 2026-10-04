@@ -1,7 +1,8 @@
 # db_builder.py — ФИНАЛЬНАЯ версия
-# Фиксы A, B, C, D, E, F, G, H + I, J
-# I: убрано требование prev_is_blank для выхода из таблицы
+# Фиксы A, B, C, D, E, F, G, H + I, J, III
+# I (v2): выход из таблицы только если после N.M идёт русский текст
 # J: VALID_CHAPTER_RANGES матчится по началу source (startswith)
+# III: отдельная регулярка RE_POINT_TEXT для проверки "N.M <русский текст>"
 
 import os
 import re
@@ -31,6 +32,10 @@ VALID_CHAPTER_RANGES = {
 
 RE_CHAPTER = re.compile(r"^(\d{1,2})\s+([А-ЯЁ][а-яё][^\n]{1,})$")
 RE_POINT = re.compile(r"^(\d{1,2}(?:\.\d{1,2}){1,4})\s+(.*)$")
+# ФИКС III: пункт с русским текстом после номера (для выхода из таблицы)
+RE_POINT_TEXT = re.compile(
+    r"^\d{1,2}(?:\.\d{1,2}){1,4}\s+[А-ЯЁа-яё«]"
+)
 RE_SUBITEM = re.compile(r"^[а-яё]\)\s|^\d\)\s")
 RE_TABLE = re.compile(r"^Таблица\s+(\d+(?:\.\d+)?)\s*(?:-.*)?$")
 RE_APPENDIX = re.compile(r"^Приложение\s+([А-ЯЁ])\s*$")
@@ -190,11 +195,13 @@ def parse_document(path: str) -> List[Dict]:
 
         # ВНУТРИ ТАБЛИЦЫ
         if in_table:
-            m_pt = RE_POINT.match(stripped)
             m_ch = RE_CHAPTER.match(stripped)
 
-            # ФИКС I: убрано требование prev_is_blank.
-            # Глава или пункт выходят из таблицы независимо от пустой строки.
+            # ФИКС I (v2): выход из таблицы только если N.M сопровождается
+            # русским текстом. Строки таблицы типа "5.2 3.1", "10.1 ..."
+            # остаются внутри.
+            m_pt_text = RE_POINT_TEXT.match(stripped)
+
             ch_is_real = False
             if m_ch:
                 ch_num = int(m_ch.group(1))
@@ -202,7 +209,7 @@ def parse_document(path: str) -> List[Dict]:
                 in_valid = (not valid_range) or (valid_range[0] <= ch_num <= valid_range[1])
                 ch_is_real = in_valid
 
-            if ch_is_real or (m_pt and not RE_SUBITEM.match(stripped)):
+            if ch_is_real or (m_pt_text and not RE_SUBITEM.match(stripped)):
                 in_table = False
                 cur_table = ""
             else:
