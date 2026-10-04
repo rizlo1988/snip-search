@@ -1,8 +1,16 @@
 # db_builder.py — ФИНАЛЬНАЯ версия
-# Фиксы A-H, I(v2), J, IV, V, VI
-# IV: RE_CHAPTER_STRICT — строгий regex для глав (до 7 слов, скобки в конце)
-# V: выход из таблицы только на RE_CHAPTER_STRICT или RE_POINT (N.M)
-# VI: RE_POINT_TEXT удалён — он был источником ложных выходов
+# Фиксы A-H, I(v2), J, IV, V, VI, VII, VIII, IX, X
+# IV:   RE_CHAPTER_STRICT — строгий regex для глав
+# V:    выход из таблицы только на RE_CHAPTER_STRICT или RE_POINT (N.M)
+# VI:   RE_POINT_TEXT удалён
+# VII:  lookahead для главы (следующая непустая — пункт/таблица/глава)
+# VIII: 1) RE_CHAPTER_STRICT принимает '*' в конце
+#       2) lookahead пропускает разделители и сноски
+# IX:   вход в in_appendix_section только если следующая непустая —
+#       (обязательное) / (рекомендуемое) / (справочное)
+# X:    RE_CHAPTER_STRICT допускает до 9 слов в названии главы
+#       (для "9 Сооружение железобетонных, бетонных, полимерных
+#        композитных мостов и труб")
 
 import os
 import re
@@ -30,29 +38,32 @@ VALID_CHAPTER_RANGES = {
     "СП 317.1325800.2017": (1, 8),
 }
 
-# Обычный regex главы — используется ВНЕ таблиц.
 RE_CHAPTER = re.compile(r"^(\d{1,2})\s+([А-ЯЁ][а-яё][^\n]{1,})$")
 
-# Строгий regex главы — используется ВНУТРИ таблиц.
-# Требует: цифра, пробел, слово с большой буквы, до 7 слов,
-# опционально — скобочный хвост типа (СВСиУ), без знаков препинания в конце.
+# Фикс X: до 9 слов в названии главы ({0,8} после первого).
+# Фикс VIII: в конце допускаются пробелы и '*' (сноска).
 RE_CHAPTER_STRICT = re.compile(
-    r"^(\d{1,2})\s+([А-ЯЁ][а-яё]+(?:\s+[а-яёА-ЯЁ\-]+){0,6})"
-    r"(?:\s*\([А-ЯЁ][а-яёА-ЯЁ\-]*\))?\s*$"
+    r"^(\d{1,2})\s+([А-ЯЁ][а-яё]+(?:\s+[а-яёА-ЯЁ\-]+){0,8})"
+    r"(?:\s*\([А-ЯЁ][а-яёА-ЯЁ\-]*\))?"
+    r"[\s\*]*$"
 )
 
 RE_POINT = re.compile(r"^(\d{1,2}(?:\.\d{1,2}){1,4})\s+(.*)$")
 RE_SUBITEM = re.compile(r"^[а-яё]\)\s|^\d\)\s")
 RE_TABLE = re.compile(r"^Таблица\s+(\d+(?:\.\d+)?)\s*(?:-.*)?$")
+
 RE_APPENDIX = re.compile(r"^Приложение\s+([А-ЯЁ])\s*$")
 RE_APPENDIX_END = re.compile(r"^(Библиография|УДК\s)")
+RE_APPENDIX_KIND = re.compile(
+    r"^\s*\(\s*(обязательное|рекомендуемое|справочное)\s*\)\s*$",
+    re.IGNORECASE,
+)
+
+RE_SEPARATOR = re.compile(r"^[_\-*=]{3,}$")
+RE_FOOTNOTE = re.compile(r"^(\(\s*в\s+ред\.|\*\s)")
 
 
 def get_valid_range(source: str):
-    """Возвращает (min, max) для документа или None.
-    Матчинг по началу строки: source = 'СП 46.13330.2012 Мосты и трубы',
-    ключ = 'СП 46.13330.2012' -> найден диапазон (1, 14).
-    """
     for key, rng in VALID_CHAPTER_RANGES.items():
         if source.startswith(key):
             return rng
@@ -63,18 +74,40 @@ def _strip_title(rest: str) -> str:
     return rest.strip().rstrip(".").strip()
 
 
-def is_real_chapter_start(lines: List[str], idx: int) -> bool:
-    return True
+def _next_content_line(lines: List[str], start_idx: int, max_lookahead: int = 6) -> str:
+    for j in range(start_idx + 1, min(start_idx + 1 + max_lookahead, len(lines))):
+        s = lines[j].strip()
+        if not s:
+            continue
+        if RE_SEPARATOR.match(s):
+            continue
+        if RE_FOOTNOTE.match(s):
+            continue
+        return s
+    return ""
 
 
-def extract_chapter_number(line: str) -> Optional[int]:
-    m = RE_CHAPTER.match(line.strip())
-    return int(m.group(1)) if m else None
+def _is_real_appendix_start(lines: List[str], idx: int) -> bool:
+    for j in range(idx + 1, min(idx + 4, len(lines))):
+        s = lines[j].strip()
+        if not s:
+            continue
+        return bool(RE_APPENDIX_KIND.match(s))
+    return False
 
 
-def extract_table_number(line: str) -> Optional[str]:
-    m = RE_TABLE.match(line.strip())
-    return m.group(1) if m else None
+def _is_real_chapter_lookahead(lines: List[str], idx: int) -> bool:
+    nxt = _next_content_line(lines, idx)
+    if not nxt:
+        return True
+    if RE_TABLE.match(nxt):
+        return True
+    if RE_CHAPTER_STRICT.match(nxt):
+        return True
+    m_pt = RE_POINT.match(nxt)
+    if m_pt and not RE_SUBITEM.match(nxt):
+        return True
+    return False
 
 
 def make_chunk_id(source: str, idx: int, text: str) -> str:
@@ -102,6 +135,8 @@ def parse_document(path: str) -> List[Dict]:
 
     buffer: List[str] = []
     buffer_meta: Dict[str, str] = {}
+
+    valid_range = get_valid_range(source)
 
     def flush_buffer():
         nonlocal buffer, buffer_meta
@@ -138,6 +173,9 @@ def parse_document(path: str) -> List[Dict]:
             "appendix": cur_appendix,
         }
 
+    def chapter_in_range(ch_num: int) -> bool:
+        return (not valid_range) or (valid_range[0] <= ch_num <= valid_range[1])
+
     i = 0
     n = len(lines)
     while i < n:
@@ -153,9 +191,8 @@ def parse_document(path: str) -> List[Dict]:
             i += 1
             continue
 
-        # Приложение
         m_app = RE_APPENDIX.match(stripped)
-        if m_app:
+        if m_app and _is_real_appendix_start(lines, i):
             cur_appendix = m_app.group(1)
             cur_table = ""
             in_table = False
@@ -172,7 +209,6 @@ def parse_document(path: str) -> List[Dict]:
             i += 1
             continue
 
-        # Таблица N
         m_tbl = RE_TABLE.match(stripped)
         if m_tbl:
             tbl_num = m_tbl.group(1)
@@ -199,12 +235,6 @@ def parse_document(path: str) -> List[Dict]:
             i += 1
             continue
 
-        # ВНУТРИ ТАБЛИЦЫ
-        # Выходим из таблицы ТОЛЬКО на:
-        #   1) настоящей главе (RE_CHAPTER_STRICT)
-        #   2) настоящем пункте N.M (RE_POINT)
-        # Строки таблиц типа "7 Отметки опорных узлов ±10 Измерительный,"
-        # не матчат ни то, ни другое и остаются внутри.
         if in_table:
             m_pt = RE_POINT.match(stripped)
             m_ch_strict = RE_CHAPTER_STRICT.match(stripped)
@@ -212,9 +242,8 @@ def parse_document(path: str) -> List[Dict]:
             ch_is_real = False
             if m_ch_strict:
                 ch_num = int(m_ch_strict.group(1))
-                valid_range = get_valid_range(source)
-                in_valid = (not valid_range) or (valid_range[0] <= ch_num <= valid_range[1])
-                ch_is_real = in_valid
+                if chapter_in_range(ch_num) and _is_real_chapter_lookahead(lines, i):
+                    ch_is_real = True
 
             if ch_is_real or (m_pt and not RE_SUBITEM.match(stripped)):
                 in_table = False
@@ -226,7 +255,6 @@ def parse_document(path: str) -> List[Dict]:
                 i += 1
                 continue
 
-        # Пункт N.M[.K[.L]]
         m_pt = RE_POINT.match(stripped)
         if m_pt and not RE_SUBITEM.match(stripped):
             point_num = m_pt.group(1)
@@ -247,38 +275,56 @@ def parse_document(path: str) -> List[Dict]:
             i += 1
             continue
 
-        # Раздел ^N Название
-        m_ch = RE_CHAPTER.match(stripped)
-        if m_ch:
-            ch_num = int(m_ch.group(1))
-            valid_range = get_valid_range(source)
-            if valid_range and not (valid_range[0] <= ch_num <= valid_range[1]):
+        m_ch_strict = RE_CHAPTER_STRICT.match(stripped)
+        if m_ch_strict:
+            ch_num = int(m_ch_strict.group(1))
+            if chapter_in_range(ch_num) and _is_real_chapter_lookahead(lines, i):
+                cur_chapter = ch_num
+                cur_chapter_title = _strip_title(m_ch_strict.group(2))
+                cur_section = ""
+                cur_section_title = ""
+                cur_point = ""
+                cur_table = ""
+                in_table = False
+
+                start_new_buffer({
+                    "chapter": str(cur_chapter),
+                    "chapter_title": cur_chapter_title,
+                    "section": "",
+                    "section_title": "",
+                    "point": "",
+                    "table_number": "",
+                    "appendix": cur_appendix,
+                })
                 buffer.append(stripped)
                 i += 1
                 continue
 
-            cur_chapter = ch_num
-            cur_chapter_title = _strip_title(m_ch.group(2))
-            cur_section = ""
-            cur_section_title = ""
-            cur_point = ""
-            cur_table = ""
-            in_table = False
+        m_ch = RE_CHAPTER.match(stripped)
+        if m_ch:
+            ch_num = int(m_ch.group(1))
+            if chapter_in_range(ch_num):
+                cur_chapter = ch_num
+                cur_chapter_title = _strip_title(m_ch.group(2))
+                cur_section = ""
+                cur_section_title = ""
+                cur_point = ""
+                cur_table = ""
+                in_table = False
 
-            start_new_buffer({
-                "chapter": str(cur_chapter),
-                "chapter_title": cur_chapter_title,
-                "section": "",
-                "section_title": "",
-                "point": "",
-                "table_number": "",
-                "appendix": cur_appendix,
-            })
-            buffer.append(stripped)
-            i += 1
-            continue
+                start_new_buffer({
+                    "chapter": str(cur_chapter),
+                    "chapter_title": cur_chapter_title,
+                    "section": "",
+                    "section_title": "",
+                    "point": "",
+                    "table_number": "",
+                    "appendix": cur_appendix,
+                })
+                buffer.append(stripped)
+                i += 1
+                continue
 
-        # Ссылка на таблицу
         ref_match = re.search(
             r"таблиц[аеыо][й]?\s+(\d+(?:\.\d+)?)", stripped, re.IGNORECASE
         )
