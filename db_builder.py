@@ -1,12 +1,5 @@
-# db_builder.py — ФИНАЛЬНАЯ версия (согласована с app.py)
-# Фиксы A (pending_table_refs), B (обрыв таблиц по ^N Название),
-# C (не наследовать chapter в табличных чанках),
-# D (поддержка СП 317 и др.),
-# E (совместимость с app.py: build_database, DB_PATH, progress_callback,
-#    chapter_title / section_title / is_table в метаданных),
-# F (ужесточённый RE_CHAPTER, слабый is_real_chapter_start),
-# G (надёжный выход из in_table по RE_CHAPTER / RE_POINT после пустой;
-#    разбиение приложения по пустым строкам).
+# db_builder.py — ФИНАЛЬНАЯ версия
+# Фиксы A, B, C, D, E, F, G + H (жёсткая проверка RE_CHAPTER внутри таблицы)
 
 import os
 import re
@@ -21,10 +14,8 @@ MIN_CHUNK_SIZE = 200
 MAX_CHUNK_SIZE = 1500
 MERGE_MIN_SIZE = 300
 
-# ---- имена, которые ждёт app.py ----
 DB_PATH = "chroma_db"
 COLLECTION_NAME = "snip_norms"
-# ------------------------------------
 
 VALID_CHAPTER_RANGES = {
     "ГОСТ Р 51872-2024": (1, 5),
@@ -36,21 +27,11 @@ VALID_CHAPTER_RANGES = {
     "СП 317.1325800.2017": (1, 8),
 }
 
-# Раздел: "5 Состав инженерно-геодезических изысканий. Общие технические требования"
-# ВАЖНО: после номера — слово с заглавной буквы, затем строчная.
 RE_CHAPTER = re.compile(r"^(\d{1,2})\s+([А-ЯЁ][а-яё][^\n]{1,})$")
-
-# Пункт: до 4 уровней вложенности ("5.3.1.4", "5.7.1.13")
 RE_POINT = re.compile(r"^(\d{1,2}(?:\.\d{1,2}){1,4})\s+(.*)$")
-
 RE_SUBITEM = re.compile(r"^[а-яё]\)\s|^\d\)\s")
-
-# Таблица: "Таблица 5.1" или "Таблица 5.1 - Основные требования..."
 RE_TABLE = re.compile(r"^Таблица\s+(\d+(?:\.\d+)?)\s*(?:-.*)?$")
-
 RE_APPENDIX = re.compile(r"^Приложение\s+([А-ЯЁ])\s*$")
-
-# Маркеры конца приложения
 RE_APPENDIX_END = re.compile(r"^(Библиография|УДК\s)")
 
 
@@ -59,7 +40,6 @@ def _strip_title(rest: str) -> str:
 
 
 def is_real_chapter_start(lines: List[str], idx: int) -> bool:
-    """Оставлена для совместимости — всегда True (RE_CHAPTER уже строгая)."""
     return True
 
 
@@ -140,7 +120,6 @@ def parse_document(path: str) -> List[Dict]:
         line = lines[i]
         stripped = line.strip()
 
-        # Конец приложения — по "Библиография" или "УДК"
         if in_appendix_section and RE_APPENDIX_END.match(stripped):
             in_appendix_section = False
 
@@ -162,7 +141,6 @@ def parse_document(path: str) -> List[Dict]:
             i += 1
             continue
 
-        # Внутри приложения — режем по пустым строкам (см. выше блок stripped == "")
         if in_appendix_section:
             if not buffer:
                 start_new_buffer(default_meta())
@@ -170,7 +148,7 @@ def parse_document(path: str) -> List[Dict]:
             i += 1
             continue
 
-        # Таблица N (или "Таблица N - Заголовок")
+        # Таблица N
         m_tbl = RE_TABLE.match(stripped)
         if m_tbl:
             tbl_num = m_tbl.group(1)
@@ -202,13 +180,17 @@ def parse_document(path: str) -> List[Dict]:
             m_pt = RE_POINT.match(stripped)
             m_ch = RE_CHAPTER.match(stripped)
             prev_is_blank = (i > 0 and lines[i - 1].strip() == "")
-            # Таблица закончилась, если:
-            #  - новый заголовок раздела, ИЛИ
-            #  - пункт N.M[.K], идущий после пустой строки.
-            if m_ch or (m_pt and not RE_SUBITEM.match(stripped) and prev_is_blank):
+
+            ch_is_real = False
+            if m_ch:
+                ch_num = int(m_ch.group(1))
+                valid_range = VALID_CHAPTER_RANGES.get(source)
+                in_valid = (not valid_range) or (valid_range[0] <= ch_num <= valid_range[1])
+                ch_is_real = in_valid and prev_is_blank
+
+            if ch_is_real or (m_pt and not RE_SUBITEM.match(stripped) and prev_is_blank):
                 in_table = False
                 cur_table = ""
-                # проваливаемся дальше — обработаем как обычную строку
             else:
                 if not buffer:
                     start_new_buffer(default_meta())
@@ -268,7 +250,7 @@ def parse_document(path: str) -> List[Dict]:
             i += 1
             continue
 
-        # Ссылка на таблицу в тексте
+        # Ссылка на таблицу
         ref_match = re.search(
             r"таблиц[аеыо][й]?\s+(\d+(?:\.\d+)?)", stripped, re.IGNORECASE
         )
