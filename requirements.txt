@@ -1,6 +1,4 @@
 streamlit
 chromadb
-sentence-transformers>=2.6
+sentence-transformers
 openai
-torchvision
-ironpress
