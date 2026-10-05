@@ -5,14 +5,16 @@ from sentence_transformers import SentenceTransformer
 import re
 import os
 from datetime import datetime
-from db_builder import DB_PATH, COLLECTION_NAME, EMBEDDING_MODEL
+from io import BytesIO
 
-# PDF
+# PDF через fpdf2 (лёгкий, ставится без бинарных зависимостей)
 try:
-    import ironpress
-    IRONPRESS_OK = True
+    from fpdf import FPDF
+    FPDF_OK = True
 except ImportError:
-    IRONPRESS_OK = False
+    FPDF_OK = False
+
+from db_builder import DB_PATH, COLLECTION_NAME, EMBEDDING_MODEL
 
 # ==================== НАСТРОЙКИ СТРАНИЦЫ ====================
 st.set_page_config(
@@ -115,6 +117,68 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ==================== PDF-ГЕНЕРАТОР ====================
+def build_pdf(question: str, answer: str, sources: list) -> bytes:
+    """Собирает PDF с вопросом, ответом и источниками. Возвращает bytes."""
+
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    # Подбираем шрифт с поддержкой кириллицы.
+    font_path = None
+    for candidate in [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/DejaVuSans.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+    ]:
+        if os.path.exists(candidate):
+            font_path = candidate
+            break
+
+    if font_path:
+        pdf.add_font("DejaVu", "", font_path, uni=True)
+        pdf.set_font("DejaVu", size=12)
+    else:
+        # Fallback — латиница; кириллица не отобразится корректно, но PDF не упадёт
+        pdf.set_font("Helvetica", size=12)
+
+    # Заголовок
+    pdf.set_font_size(16)
+    pdf.multi_cell(0, 8, "Ответ по строительным нормам")
+    pdf.ln(3)
+
+    # Вопрос
+    pdf.set_font_size(12)
+    pdf.multi_cell(0, 6, f"Вопрос: {question}")
+    pdf.ln(4)
+
+    # Ответ
+    pdf.set_font_size(12)
+    pdf.multi_cell(0, 6, "Ответ:")
+    pdf.ln(1)
+    pdf.set_font_size(11)
+    # Убираем markdown-маркеры, чтобы не сбивать вёрстку
+    answer_clean = re.sub(r"[#*`_]+", "", answer)
+    pdf.multi_cell(0, 6, answer_clean)
+    pdf.ln(4)
+
+    # Источники
+    if sources:
+        pdf.set_font_size(12)
+        pdf.multi_cell(0, 6, "Источники:")
+        pdf.ln(1)
+        pdf.set_font_size(10)
+        for i, s in enumerate(sources, 1):
+            pdf.multi_cell(0, 5, f"{i}. {s}")
+
+    # Сохраняем в память
+    out = pdf.output(dest="S")
+    if isinstance(out, str):
+        out = out.encode("latin-1")
+    return bytes(out)
 
 
 # ==================== ИНИЦИАЛИЗАЦИЯ ====================
@@ -297,6 +361,16 @@ with st.sidebar:
                 st.session_state.current_question = q
                 st.rerun()
 
+        if st.button("🗑️ Очистить историю", key="clear_history", use_container_width=True):
+            st.session_state.history = []
+            st.session_state.feedback = {}
+            st.session_state.current_answer = None
+            st.session_state.current_sources = []
+            st.session_state.current_fragments = []
+            st.session_state.current_question = ""
+            st.success("История очищена")
+            st.rerun()
+
     if st.session_state.feedback:
         st.markdown("---")
         st.markdown("### 📊 Оценки")
@@ -343,7 +417,6 @@ if ask_button:
 
         candidates = []
 
-        # === Векторизация вопроса ТОЙ ЖЕ моделью, что база ===
         try:
             q_emb = embedder.encode([question], normalize_embeddings=True).tolist()
         except Exception as e:
@@ -354,7 +427,6 @@ if ask_button:
         if selected_sources:
             where_filter = {"source": {"$in": selected_sources}}
 
-        # === Векторный поиск через query_embeddings ===
         if q_emb is not None:
             try:
                 vector_results = collection.query(
@@ -393,7 +465,6 @@ if ask_button:
                     except Exception:
                         pass
 
-        # === Поиск по упомянутым таблицам ===
         table_matches = re.findall(
             r'таблиц[аы]?\s*([А-ЯA-Z]?\.?\d+(?:\.\d+)?)',
             question,
@@ -421,7 +492,6 @@ if ask_button:
                 except Exception:
                     pass
 
-        # === Дополнительный поиск по ключевым словам ===
         if re.search(r'допуск|отклонени', question, re.IGNORECASE) and q_emb is not None:
             try:
                 kw_emb = embedder.encode(
@@ -446,7 +516,6 @@ if ask_button:
             except Exception:
                 pass
 
-        # === Смягчённый фильтр: достаточно цифры ИЛИ ключевого слова ===
         filtered = []
         for c in candidates:
             text_lower = c['text'].lower()
@@ -461,7 +530,6 @@ if ask_button:
         if not filtered:
             filtered = candidates
 
-        # === Уникализация ===
         seen = set()
         unique_filtered = []
         for c in filtered:
@@ -537,23 +605,21 @@ if st.session_state.current_answer:
     action_cols = st.columns([1, 1, 1, 2])
 
     with action_cols[0]:
-        if IRONPRESS_OK:
+        if FPDF_OK:
             try:
-                pdf_bytes = ironpress.markdown_to_pdf(
-                    f"# {question}\n\n{answer}\n\n---\n\n## Источники\n\n" +
-                    "\n".join(f"- {s}" for s in sources)
-                )
+                pdf_bytes = build_pdf(question, answer, sources)
                 st.download_button(
                     "💾 Скачать PDF",
                     data=pdf_bytes,
                     file_name=f"snip_answer_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
                     mime="application/pdf",
-                    key="dl_pdf"
+                    key="dl_pdf",
+                    use_container_width=True
                 )
             except Exception as e:
-                st.caption(f"PDF недоступен: {e}")
+                st.caption(f"Не удалось собрать PDF: {e}")
         else:
-            st.caption("PDF: установите ironpress")
+            st.caption("PDF: добавьте `fpdf2` в requirements.txt")
 
     with action_cols[1]:
         with st.popover("📋 Копировать"):
