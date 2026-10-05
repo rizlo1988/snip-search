@@ -1,11 +1,11 @@
 import streamlit as st
 import chromadb
 from openai import OpenAI
+from sentence_transformers import SentenceTransformer
 import re
 import os
 from datetime import datetime
-from collections import Counter
-from db_builder import DB_PATH, COLLECTION_NAME
+from db_builder import DB_PATH, COLLECTION_NAME, EMBEDDING_MODEL
 
 # PDF
 try:
@@ -25,9 +25,7 @@ st.set_page_config(
 # ==================== КАСТОМНЫЙ CSS ====================
 st.markdown("""
 <style>
-    .stApp {
-        background: var(--background-color);
-    }
+    .stApp { background: var(--background-color); }
     .main-header {
         color: var(--primary-color);
         font-size: 1.7rem;
@@ -134,9 +132,16 @@ def load_client():
 client = load_client()
 
 
+@st.cache_resource(show_spinner="Загружаю модель эмбеддингов…")
+def load_embedder():
+    return SentenceTransformer(EMBEDDING_MODEL)
+
+
+embedder = load_embedder()
+
+
 @st.cache_resource(show_spinner=False)
 def load_collection():
-    # База должна быть собрана заранее (python db_builder.py) и закоммичена в репо.
     if not os.path.isdir(DB_PATH) or not os.listdir(DB_PATH):
         st.error(
             "❌ База `chroma_db` не найдена в репозитории.\n\n"
@@ -173,7 +178,6 @@ sources_list = count_sources()
 
 # ==================== АУДИТ БАЗЫ ====================
 def run_audit():
-    """Собирает статистику по базе. Возвращает список строк отчёта."""
     lines = []
     try:
         all_meta = collection.get(include=["metadatas", "documents"])
@@ -300,7 +304,6 @@ with st.sidebar:
         downs = sum(1 for v in st.session_state.feedback.values() if v == 0)
         st.markdown(f"👍 **{ups}** · 👎 **{downs}**")
 
-    # ===== АУДИТ БАЗЫ =====
     st.markdown("---")
     st.markdown("### 🔎 Аудит базы")
     if st.button("Запустить аудит", use_container_width=True, key="audit_btn"):
@@ -340,29 +343,25 @@ if ask_button:
 
         candidates = []
 
+        # === Векторизация вопроса ТОЙ ЖЕ моделью, что база ===
+        try:
+            q_emb = embedder.encode([question], normalize_embeddings=True).tolist()
+        except Exception as e:
+            st.error(f"Ошибка векторизации вопроса: {e}")
+            q_emb = None
+
         where_filter = None
         if selected_sources:
             where_filter = {"source": {"$in": selected_sources}}
 
-        try:
-            vector_results = collection.query(
-                query_texts=[question],
-                n_results=30,
-                where=where_filter
-            )
-            if vector_results['documents'] and vector_results['documents'][0]:
-                for i, doc in enumerate(vector_results['documents'][0]):
-                    meta = vector_results['metadatas'][0][i]
-                    candidates.append({
-                        'text': doc,
-                        'source': meta['source'],
-                        'section': meta.get('section', ''),
-                        'tables': meta.get('tables', ''),
-                        'type': 'векторный'
-                    })
-        except Exception:
-            if where_filter:
-                vector_results = collection.query(query_texts=[question], n_results=30)
+        # === Векторный поиск через query_embeddings ===
+        if q_emb is not None:
+            try:
+                vector_results = collection.query(
+                    query_embeddings=q_emb,
+                    n_results=30,
+                    where=where_filter,
+                )
                 if vector_results['documents'] and vector_results['documents'][0]:
                     for i, doc in enumerate(vector_results['documents'][0]):
                         meta = vector_results['metadatas'][0][i]
@@ -371,9 +370,30 @@ if ask_button:
                             'source': meta['source'],
                             'section': meta.get('section', ''),
                             'tables': meta.get('tables', ''),
-                            'type': 'векторный (без фильтра)'
+                            'type': 'векторный'
                         })
+            except Exception as e:
+                st.warning(f"Ошибка векторного поиска: {e}")
+                if where_filter:
+                    try:
+                        vector_results = collection.query(
+                            query_embeddings=q_emb,
+                            n_results=30,
+                        )
+                        if vector_results['documents'] and vector_results['documents'][0]:
+                            for i, doc in enumerate(vector_results['documents'][0]):
+                                meta = vector_results['metadatas'][0][i]
+                                candidates.append({
+                                    'text': doc,
+                                    'source': meta['source'],
+                                    'section': meta.get('section', ''),
+                                    'tables': meta.get('tables', ''),
+                                    'type': 'векторный (без фильтра)'
+                                })
+                    except Exception:
+                        pass
 
+        # === Поиск по упомянутым таблицам ===
         table_matches = re.findall(
             r'таблиц[аы]?\s*([А-ЯA-Z]?\.?\d+(?:\.\d+)?)',
             question,
@@ -401,10 +421,15 @@ if ask_button:
                 except Exception:
                     pass
 
-        if re.search(r'допуск|отклонени', question, re.IGNORECASE):
+        # === Дополнительный поиск по ключевым словам ===
+        if re.search(r'допуск|отклонени', question, re.IGNORECASE) and q_emb is not None:
             try:
+                kw_emb = embedder.encode(
+                    ["допуск отклонение не более мм"],
+                    normalize_embeddings=True
+                ).tolist()
                 keyword_results = collection.query(
-                    query_texts=["допуск отклонение не более мм"],
+                    query_embeddings=kw_emb,
                     n_results=20,
                     where=where_filter
                 )
@@ -421,25 +446,28 @@ if ask_button:
             except Exception:
                 pass
 
+        # === Смягчённый фильтр: достаточно цифры ИЛИ ключевого слова ===
         filtered = []
         for c in candidates:
             text_lower = c['text'].lower()
             has_number = bool(re.search(r'\d+', c['text']))
             has_keyword = any(
                 word in text_lower
-                for word in ['допуск', 'отклонен', 'мм', 'таблиц', 'не более']
+                for word in ['допуск', 'отклонен', 'мм', 'таблиц', 'не более', 'отметк']
             )
-            if has_number and has_keyword:
+            if has_number or has_keyword:
                 filtered.append(c)
 
         if not filtered:
             filtered = candidates
 
+        # === Уникализация ===
         seen = set()
         unique_filtered = []
         for c in filtered:
-            if c['text'] not in seen:
-                seen.add(c['text'])
+            key = c['text'][:200]
+            if key not in seen:
+                seen.add(key)
                 unique_filtered.append(c)
 
         unique_filtered = unique_filtered[:25]
