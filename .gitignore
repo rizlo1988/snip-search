@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Secrets
+key.txt
+.streamlit/secrets.toml
+.streamlit/secrets.yaml
+
+# Debug / test output
+test_output*.txt
+test_debug.txt
+
+# Backup / old
+бекап/
+chroma_db_old/
+
+# Случайный файл "python" (0 байт)
+python
+
+# Не относится к проекту
+*.xlsx
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+*.lnk
