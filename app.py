@@ -172,8 +172,6 @@ sources_list = count_sources()
 # ==================== SESSION STATE ====================
 if "history" not in st.session_state:
     st.session_state.history = []
-if "selected_example" not in st.session_state:
-    st.session_state.selected_example = ""
 if "feedback" not in st.session_state:
     st.session_state.feedback = {}
 if "current_answer" not in st.session_state:
@@ -233,7 +231,7 @@ with st.sidebar:
         st.caption("Нажми на вопрос, чтобы повторить")
         for i, q in enumerate(reversed(st.session_state.history[-5:])):
             if st.button(f"↻ {q[:50]}", key=f"hist_{i}", use_container_width=True):
-                st.session_state.selected_example = q
+                st.session_state.current_question = q
                 st.rerun()
 
     if st.session_state.feedback:
@@ -248,42 +246,15 @@ with st.sidebar:
 st.markdown('<h1 class="main-header">🏗️ Поиск по СНиПам</h1>', unsafe_allow_html=True)
 st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
 
-st.markdown("**💡 Примеры вопросов:**")
-
-examples = [
-    ("🏗️ Асфальт", "толщина слоя асфальта"),
-    ("📏 Допуски", "допуски по кернам"),
-    ("🛣️ Уклон", "поперечный уклон дороги"),
-    ("🌉 Мосты", "требования к мостам"),
-]
-
-row1 = st.columns(2)
-for i, (label, query) in enumerate(examples[:2]):
-    with row1[i]:
-        if st.button(label, key=f"ex_{i}", use_container_width=True):
-            st.session_state.selected_example = query
-            st.rerun()
-
-row2 = st.columns(2)
-for i, (label, query) in enumerate(examples[2:], start=2):
-    with row2[i - 2]:
-        if st.button(label, key=f"ex_{i}", use_container_width=True):
-            st.session_state.selected_example = query
-            st.rerun()
-
 
 # ==================== ФОРМА ====================
 with st.form("search_form", clear_on_submit=False):
     question = st.text_input(
         "Ваш вопрос:",
-        value=st.session_state.selected_example,
         placeholder="Например: допуски по асфальту",
         key="question_field"
     )
     ask_button = st.form_submit_button("🔍 Найти ответ", type="primary", use_container_width=False)
-
-if st.session_state.selected_example:
-    st.session_state.selected_example = ""
 
 # ==================== ОБРАБОТКА ====================
 if ask_button:
