@@ -1,213 +1,514 @@
-# app.py — RAG-поиск по строительным нормам (СП, СНиП, ГОСТ)
-# Стек: Streamlit + ChromaDB + sentence-transformers + Cloud.ru (Qwen3-30B-A3B)
-#
-# Требования:
-#   1. Папка chroma_db/ в корне репозитория (собирается локально: python db_builder.py)
-#   2. Secrets (Streamlit → Settings → Secrets):
-#        CLOUDRU_API_KEY  = "..."
-#        CLOUDRU_BASE_URL = "https://foundation-models.api.cloud.ru/v1"
-#        CLOUDRU_MODEL    = "Qwen/Qwen3-30B-A3B"
-#
-# Запуск: streamlit run app.py
-
-import os
 import streamlit as st
 import chromadb
-from sentence_transformers import SentenceTransformer
 from openai import OpenAI
+import re
+import os
+from datetime import datetime
+from db_builder import DB_PATH, COLLECTION_NAME
 
-# ------------------------------------------------------------------ config
-DB_PATH = "chroma_db"
-COLLECTION_NAME = "snip_norms"
-EMBEDDING_MODEL = "sergeyzh/rubert-mini-frida"
-DEFAULT_TOP_K = 6
-MAX_CONTEXT_CHARS = 12000
+# PDF
+try:
+    import ironpress
+    IRONPRESS_OK = True
+except ImportError:
+    IRONPRESS_OK = False
 
+# ==================== НАСТРОЙКИ СТРАНИЦЫ ====================
 st.set_page_config(
-    page_title="Поиск по строительным нормам",
+    page_title="Поиск по СНиПам",
     page_icon="🏗️",
     layout="wide",
+    initial_sidebar_state="auto"
 )
 
-# ------------------------------------------------------- проверка базы
-if not os.path.isdir(DB_PATH) or not os.listdir(DB_PATH):
-    st.error(
-        "❌ База `chroma_db` не найдена в репозитории.\n\n"
-        "Соберите её локально: `python db_builder.py`, затем закоммитьте "
-        "папку `chroma_db/` и запушьте в `main`."
-    )
-    st.stop()
+# ==================== КАСТОМНЫЙ CSS ====================
+st.markdown("""
+<style>
+    .stApp {
+        background: var(--background-color);
+    }
+    .main-header {
+        color: var(--primary-color);
+        font-size: 1.7rem;
+        font-weight: 700;
+        margin-bottom: 0.5rem;
+        line-height: 1.2;
+    }
+    .main-subheader {
+        color: var(--text-color);
+        opacity: 0.7;
+        font-size: 1rem;
+        margin-bottom: 1.5rem;
+    }
+    .sidebar-header {
+        color: var(--primary-color);
+        font-size: 1.3rem;
+        font-weight: 700;
+        margin-bottom: 0.5rem;
+    }
+    .stButton > button, .stFormSubmitButton > button {
+        border-radius: 8px;
+        font-weight: 600;
+        transition: all 0.3s;
+    }
+    .stButton > button:hover, .stFormSubmitButton > button:hover {
+        transform: translateY(-2px);
+    }
+    .stTextInput > div > div > input {
+        border-radius: 8px;
+        padding: 0.75rem;
+        font-size: 1rem;
+    }
+    [data-testid="stSidebar"] {
+        min-width: 260px !important;
+        max-width: 300px !important;
+    }
+    .doc-card {
+        background: var(--secondary-background-color);
+        border-left: 4px solid var(--primary-color);
+        padding: 0.5rem 0.75rem;
+        margin-bottom: 0.4rem;
+        border-radius: 6px;
+        font-size: 0.8rem;
+        line-height: 1.3;
+    }
+    .fragments-info {
+        background: var(--secondary-background-color);
+        border-radius: 8px;
+        padding: 0.75rem 1rem;
+        margin: 1rem 0;
+        color: var(--primary-color);
+        font-weight: 600;
+    }
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
+    @media (max-width: 768px) {
+        .main-header { font-size: 1.3rem !important; line-height: 1.2; margin-bottom: 0.3rem; }
+        .main-subheader { font-size: 0.85rem; margin-bottom: 1rem; line-height: 1.3; }
+        .block-container {
+            padding-top: 1rem !important;
+            padding-bottom: 3rem !important;
+            padding-left: 0.75rem !important;
+            padding-right: 0.75rem !important;
+        }
+        [data-testid="stSidebar"] { min-width: 0 !important; max-width: 100% !important; }
+        [data-testid="stSidebar"] .doc-card { font-size: 0.75rem; padding: 0.4rem 0.6rem; }
+        .stButton > button, .stFormSubmitButton > button {
+            font-size: 0.9rem !important;
+            padding: 0.6rem 0.8rem !important;
+            min-height: 2.6rem;
+        }
+        .stFormSubmitButton > button {
+            font-size: 1rem !important;
+            padding: 0.75rem 1.5rem !important;
+            min-height: 3rem !important;
+        }
+        .stTextInput > div > div > input {
+            font-size: 1rem !important;
+            padding: 0.75rem !important;
+            min-height: 2.75rem;
+        }
+        .fragments-info { font-size: 0.85rem; padding: 0.6rem 0.8rem; margin: 0.75rem 0; }
+        .stExpander { margin-bottom: 0.5rem !important; }
+        .stExpander summary { font-size: 0.9rem !important; }
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# ------------------------------------------------------- кешированные ресурсы
-@st.cache_resource(show_spinner="Загружаю модель эмбеддингов…")
-def load_model() -> SentenceTransformer:
-    return SentenceTransformer(EMBEDDING_MODEL)
 
-
-@st.cache_resource(show_spinner="Открываю базу…")
-def load_collection():
-    client = chromadb.PersistentClient(path=DB_PATH)
-    return client.get_collection(COLLECTION_NAME)
-
-
+# ==================== ИНИЦИАЛИЗАЦИЯ ====================
 @st.cache_resource
-def load_llm_client() -> OpenAI:
-    api_key = st.secrets.get("CLOUDRU_API_KEY") or os.environ.get("CLOUDRU_API_KEY")
-    base_url = (
-        st.secrets.get("CLOUDRU_BASE_URL")
-        or os.environ.get("CLOUDRU_BASE_URL")
-        or "https://foundation-models.api.cloud.ru/v1"
+def load_client():
+    api_key = st.secrets["CLOUD_API_KEY"]
+    return OpenAI(
+        api_key=api_key,
+        base_url="https://foundation-models.api.cloud.ru/v1",
+        timeout=300.0,
+        max_retries=2
     )
-    if not api_key:
+
+
+client = load_client()
+
+
+@st.cache_resource(show_spinner=False)
+def load_collection():
+    # База должна быть собрана заранее (python db_builder.py) и закоммичена в репо.
+    if not os.path.isdir(DB_PATH) or not os.listdir(DB_PATH):
         st.error(
-            "❌ Не задан `CLOUDRU_API_KEY`. "
-            "Добавьте его в Streamlit → Settings → Secrets."
+            "❌ База `chroma_db` не найдена в репозитории.\n\n"
+            "Соберите её локально: `python db_builder.py`, затем закоммитьте "
+            "папку `chroma_db/` и запушьте в `main`."
         )
         st.stop()
-    return OpenAI(api_key=api_key, base_url=base_url)
 
-
-def get_model_name() -> str:
-    return (
-        st.secrets.get("CLOUDRU_MODEL")
-        or os.environ.get("CLOUDRU_MODEL")
-        or "Qwen/Qwen3-30B-A3B"
-    )
-
-
-# ------------------------------------------------------- утилиты
-def format_source(meta: dict) -> str:
-    """Собирает человекочитаемую ссылку на источник."""
-    parts = [meta.get("source", "?")]
-    if meta.get("chapter"):
-        ch = meta["chapter"]
-        title = meta.get("chapter_title", "")
-        parts.append(f"глава {ch}" + (f" «{title}»" if title else ""))
-    if meta.get("section"):
-        parts.append(f"раздел {meta['section']}")
-    if meta.get("point"):
-        parts.append(f"п. {meta['point']}")
-    if meta.get("table_number"):
-        parts.append(f"таблица {meta['table_number']}")
-    if meta.get("appendix"):
-        parts.append(f"приложение {meta['appendix']}")
-    return " → ".join(parts)
-
-
-def build_context(hits: list) -> str:
-    """Склеивает top-K чанков в один контекст, не превышая лимит."""
-    blocks = []
-    total = 0
-    for i, (doc, meta, _dist) in enumerate(hits, 1):
-        header = f"[{i}] {format_source(meta)}"
-        block = f"{header}\n{doc}\n"
-        if total + len(block) > MAX_CONTEXT_CHARS:
-            break
-        blocks.append(block)
-        total += len(block)
-    return "\n---\n".join(blocks)
-
-
-SYSTEM_PROMPT = (
-    "Ты — инженер-эксперт по строительным нормам РФ (СП, СНиП, ГОСТ). "
-    "Отвечай ТОЛЬКО на основе приведённых ниже фрагментов документов. "
-    "В конце ответа обязательно перечисли использованные источники в формате "
-    "«источник → глава → раздел → пункт/таблица». "
-    "Если ответа в контексте нет — прямо скажи: "
-    "«В предоставленных фрагментах ответа нет» и не выдумывай."
-)
-
-
-# ------------------------------------------------------- UI
-st.title("🏗️ Поиск по строительным нормам")
-st.caption(
-    "СП, СНиП, ГОСТ. Ответ со ссылками на документ / главу / раздел / пункт / таблицу."
-)
-
-with st.sidebar:
-    st.header("Настройки")
-    top_k = st.slider("Сколько фрагментов искать", 3, 12, DEFAULT_TOP_K)
-    show_context = st.checkbox("Показать найденный контекст", value=False)
-    if st.button("Очистить историю"):
-        st.session_state.messages = []
-        st.rerun()
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# Рендер прошлых сообщений
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-        if msg.get("sources"):
-            with st.expander("Источники"):
-                for s in msg["sources"]:
-                    st.markdown(f"- {s}")
-
-# Ввод
-query = st.chat_input("Спросите про норму, пункт, таблицу…")
-if not query:
-    st.stop()
-
-st.session_state.messages.append({"role": "user", "content": query})
-with st.chat_message("user"):
-    st.markdown(query)
-
-# Загрузка ресурсов (после UI, чтобы Streamlit показал спиннеры)
-model = load_model()
-collection = load_collection()
-llm = load_llm_client()
-model_name = get_model_name()
-
-with st.chat_message("assistant"):
-    with st.spinner("Ищу в нормах…"):
-        q_emb = model.encode([query], normalize_embeddings=True).tolist()[0]
-        res = collection.query(
-            query_embeddings=[q_emb],
-            n_results=top_k,
-            include=["documents", "metadatas", "distances"],
+    chroma_client = chromadb.PersistentClient(path=DB_PATH)
+    try:
+        return chroma_client.get_collection(name=COLLECTION_NAME)
+    except Exception as e:
+        st.error(
+            f"❌ Не удалось открыть коллекцию `{COLLECTION_NAME}` в `{DB_PATH}`: {e}"
         )
-        docs = res["documents"][0]
-        metas = res["metadatas"][0]
-        dists = res["distances"][0]
+        st.stop()
 
-    hits = list(zip(docs, metas, dists))
-    context = build_context(hits)
-    sources = [format_source(m) for _, m, _ in hits]
 
-    if show_context:
-        with st.expander("Найденный контекст (top-K)", expanded=False):
-            st.text(context)
+collection = load_collection()
 
-    user_msg = (
-        f"Вопрос: {query}\n\n"
-        f"Фрагменты нормативных документов:\n{context}\n\n"
-        f"Дай ответ и перечисли источники."
+
+@st.cache_data
+def count_sources():
+    try:
+        all_meta = collection.get(include=["metadatas"])["metadatas"]
+        sources = set(m["source"] for m in all_meta if m and "source" in m)
+        return sorted(sources)
+    except Exception:
+        return []
+
+
+sources_list = count_sources()
+
+# ==================== SESSION STATE ====================
+if "history" not in st.session_state:
+    st.session_state.history = []
+if "selected_example" not in st.session_state:
+    st.session_state.selected_example = ""
+if "feedback" not in st.session_state:
+    st.session_state.feedback = {}
+if "current_answer" not in st.session_state:
+    st.session_state.current_answer = None
+if "current_sources" not in st.session_state:
+    st.session_state.current_sources = []
+if "current_fragments" not in st.session_state:
+    st.session_state.current_fragments = []
+if "current_question" not in st.session_state:
+    st.session_state.current_question = ""
+
+# ==================== САЙДБАР ====================
+with st.sidebar:
+    st.markdown('<div class="sidebar-header">📚 База знаний</div>', unsafe_allow_html=True)
+    st.markdown(f"**{len(sources_list)}** документов загружено")
+    st.markdown("---")
+
+    st.markdown("### 🎯 Фильтр по документам")
+    selected_sources = st.multiselect(
+        "Искать только в:",
+        options=sources_list,
+        default=[],
+        placeholder="Выберите документы...",
+        format_func=lambda x: x.replace(".txt", "")[:40] + "...",
+        key="source_filter"
     )
 
-    with st.spinner("Формулирую ответ…"):
+    if selected_sources:
+        st.caption(f"🔍 Поиск в **{len(selected_sources)}** документ(ах)")
+    else:
+        st.caption("🔍 Поиск во **всех** документах")
+
+    st.markdown("---")
+    st.markdown("### 📄 Документы")
+    for src in sources_list:
+        if "ГОСТ" in src:
+            icon = "📘"
+        elif "СП" in src:
+            icon = "📗"
+        else:
+            icon = "📄"
+
+        clean_name = src.replace(".txt", "")
+        if len(clean_name) > 40:
+            truncated = clean_name[:40]
+            if ' ' in truncated:
+                truncated = truncated.rsplit(' ', 1)[0]
+            display_name = truncated + "..."
+        else:
+            display_name = clean_name
+
+        st.markdown(f'<div class="doc-card">{icon} {display_name}</div>', unsafe_allow_html=True)
+
+    if st.session_state.history:
+        st.markdown("---")
+        st.markdown("### 🕐 История")
+        st.caption("Нажми на вопрос, чтобы повторить")
+        for i, q in enumerate(reversed(st.session_state.history[-5:])):
+            if st.button(f"↻ {q[:50]}", key=f"hist_{i}", use_container_width=True):
+                st.session_state.selected_example = q
+                st.rerun()
+
+    if st.session_state.feedback:
+        st.markdown("---")
+        st.markdown("### 📊 Оценки")
+        ups = sum(1 for v in st.session_state.feedback.values() if v == 1)
+        downs = sum(1 for v in st.session_state.feedback.values() if v == 0)
+        st.markdown(f"👍 **{ups}** · 👎 **{downs}**")
+
+
+# ==================== ОСНОВНОЙ КОНТЕНТ ====================
+st.markdown('<h1 class="main-header">🏗️ Поиск по СНиПам</h1>', unsafe_allow_html=True)
+st.markdown('<p class="main-subheader">Задайте вопрос — программа найдёт ответ в СП, СНиП и ГОСТ с указанием источника.</p>', unsafe_allow_html=True)
+
+st.markdown("**💡 Примеры вопросов:**")
+
+examples = [
+    ("🏗️ Асфальт", "толщина слоя асфальта"),
+    ("📏 Допуски", "допуски по кернам"),
+    ("🛣️ Уклон", "поперечный уклон дороги"),
+    ("🌉 Мосты", "требования к мостам"),
+]
+
+row1 = st.columns(2)
+for i, (label, query) in enumerate(examples[:2]):
+    with row1[i]:
+        if st.button(label, key=f"ex_{i}", use_container_width=True):
+            st.session_state.selected_example = query
+            st.rerun()
+
+row2 = st.columns(2)
+for i, (label, query) in enumerate(examples[2:], start=2):
+    with row2[i - 2]:
+        if st.button(label, key=f"ex_{i}", use_container_width=True):
+            st.session_state.selected_example = query
+            st.rerun()
+
+
+# ==================== ФОРМА ====================
+with st.form("search_form", clear_on_submit=False):
+    question = st.text_input(
+        "Ваш вопрос:",
+        value=st.session_state.selected_example,
+        placeholder="Например: допуски по асфальту",
+        key="question_field"
+    )
+    ask_button = st.form_submit_button("🔍 Найти ответ", type="primary", use_container_width=False)
+
+if st.session_state.selected_example:
+    st.session_state.selected_example = ""
+
+# ==================== ОБРАБОТКА ====================
+if ask_button:
+    if not question.strip():
+        st.warning("Пожалуйста, введите вопрос.")
+    else:
+        if question not in st.session_state.history:
+            st.session_state.history.append(question)
+
+        status_placeholder = st.empty()
+        status_placeholder.info("⏳ Ищу ответ в документах…")
+
+        candidates = []
+
+        where_filter = None
+        if selected_sources:
+            where_filter = {"source": {"$in": selected_sources}}
+
         try:
-            resp = llm.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_msg},
-                ],
-                temperature=0.2,
-                max_tokens=1500,
+            vector_results = collection.query(
+                query_texts=[question],
+                n_results=30,
+                where=where_filter
             )
-            answer = resp.choices[0].message.content
+            if vector_results['documents'] and vector_results['documents'][0]:
+                for i, doc in enumerate(vector_results['documents'][0]):
+                    meta = vector_results['metadatas'][0][i]
+                    candidates.append({
+                        'text': doc,
+                        'source': meta['source'],
+                        'section': meta.get('section', ''),
+                        'tables': meta.get('tables', ''),
+                        'type': 'векторный'
+                    })
+        except Exception:
+            if where_filter:
+                vector_results = collection.query(query_texts=[question], n_results=30)
+                if vector_results['documents'] and vector_results['documents'][0]:
+                    for i, doc in enumerate(vector_results['documents'][0]):
+                        meta = vector_results['metadatas'][0][i]
+                        candidates.append({
+                            'text': doc,
+                            'source': meta['source'],
+                            'section': meta.get('section', ''),
+                            'tables': meta.get('tables', ''),
+                            'type': 'векторный (без фильтра)'
+                        })
+
+        table_matches = re.findall(
+            r'таблиц[аы]?\s*([А-ЯA-Z]?\.?\d+(?:\.\d+)?)',
+            question,
+            re.IGNORECASE
+        )
+        if table_matches:
+            for table_num in table_matches:
+                try:
+                    table_results = collection.get(
+                        where_document={"$contains": f"Таблица {table_num}"},
+                        limit=10
+                    )
+                    if table_results['documents']:
+                        for i, doc in enumerate(table_results['documents']):
+                            meta = table_results['metadatas'][i]
+                            if selected_sources and meta['source'] not in selected_sources:
+                                continue
+                            candidates.append({
+                                'text': doc,
+                                'source': meta['source'],
+                                'section': meta.get('section', ''),
+                                'tables': meta.get('tables', ''),
+                                'type': f'таблица {table_num}'
+                            })
+                except Exception:
+                    pass
+
+        if re.search(r'допуск|отклонени', question, re.IGNORECASE):
+            try:
+                keyword_results = collection.query(
+                    query_texts=["допуск отклонение не более мм"],
+                    n_results=20,
+                    where=where_filter
+                )
+                if keyword_results['documents'] and keyword_results['documents'][0]:
+                    for i, doc in enumerate(keyword_results['documents'][0]):
+                        meta = keyword_results['metadatas'][0][i]
+                        candidates.append({
+                            'text': doc,
+                            'source': meta['source'],
+                            'section': meta.get('section', ''),
+                            'tables': meta.get('tables', ''),
+                            'type': 'ключевые слова'
+                        })
+            except Exception:
+                pass
+
+        filtered = []
+        for c in candidates:
+            text_lower = c['text'].lower()
+            has_number = bool(re.search(r'\d+', c['text']))
+            has_keyword = any(
+                word in text_lower
+                for word in ['допуск', 'отклонен', 'мм', 'таблиц', 'не более']
+            )
+            if has_number and has_keyword:
+                filtered.append(c)
+
+        if not filtered:
+            filtered = candidates
+
+        seen = set()
+        unique_filtered = []
+        for c in filtered:
+            if c['text'] not in seen:
+                seen.add(c['text'])
+                unique_filtered.append(c)
+
+        unique_filtered = unique_filtered[:25]
+
+        context = ""
+        sources = []
+        for c in unique_filtered:
+            ref = c['source']
+            if c['section']:
+                ref += f", раздел {c['section']}"
+            if c['tables']:
+                ref += f", таблица {c['tables']}"
+            context += f"\n\n--- Источник: {ref} ---\n{c['text']}"
+            if ref not in sources:
+                sources.append(ref)
+
+        status_placeholder.empty()
+
+        st.session_state.current_question = question
+        st.session_state.current_sources = sources
+        st.session_state.current_fragments = unique_filtered
+
+        st.markdown(
+            f'<div class="fragments-info">📖 Отобрано фрагментов: {len(unique_filtered)}</div>',
+            unsafe_allow_html=True
+        )
+
+        prompt = f"""Не размышляй. Сразу давай ответ.
+Ты — эксперт по строительным нормам и правилам.
+Отвечай подробно. Приведи ВСЕ найденные допуски и отклонения из фрагментов.
+Структурируй ответ: раздели на пункты, для каждого укажи значение и источник.
+Если в фрагментах нет ответа — честно скажи об этом.
+Обязательно укажи, из какого документа, раздела и пункта взята информация.
+
+ФРАГМЕНТЫ ДОКУМЕНТОВ:
+{context}
+
+ВОПРОС:
+{question}
+"""
+
+        try:
+            with st.spinner("🤖 ИИ формулирует ответ…"):
+                response = client.chat.completions.create(
+                    model="Qwen/Qwen3-30B-A3B",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=2000,
+                    extra_body={"enable_thinking": False}
+                )
+            answer = response.choices[0].message.content
+            st.session_state.current_answer = answer
         except Exception as e:
-            answer = f"⚠️ Ошибка обращения к LLM: `{e}`"
+            st.error(f"Произошла ошибка: {e}")
+            st.session_state.current_answer = None
 
+# ==================== РЕЗУЛЬТАТ ====================
+if st.session_state.current_answer:
+    question = st.session_state.current_question
+    answer = st.session_state.current_answer
+    sources = st.session_state.current_sources
+    unique_filtered = st.session_state.current_fragments
+
+    st.success("✅ Ответ найден!")
+    st.markdown("### 📖 Ответ:")
     st.markdown(answer)
-    if sources:
-        with st.expander("Источники"):
-            for s in sources:
-                st.markdown(f"- {s}")
 
-st.session_state.messages.append({
-    "role": "assistant",
-    "content": answer,
-    "sources": sources,
-})
+    action_cols = st.columns([1, 1, 1, 2])
+
+    with action_cols[0]:
+        if IRONPRESS_OK:
+            try:
+                pdf_bytes = ironpress.markdown_to_pdf(
+                    f"# {question}\n\n{answer}\n\n---\n\n## Источники\n\n" +
+                    "\n".join(f"- {s}" for s in sources)
+                )
+                st.download_button(
+                    "💾 Скачать PDF",
+                    data=pdf_bytes,
+                    file_name=f"snip_answer_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    mime="application/pdf",
+                    key="dl_pdf"
+                )
+            except Exception as e:
+                st.caption(f"PDF недоступен: {e}")
+        else:
+            st.caption("PDF: установите ironpress")
+
+    with action_cols[1]:
+        with st.popover("📋 Копировать"):
+            st.code(answer, language="markdown")
+
+    with action_cols[2]:
+        fb = st.feedback("thumbs", key=f"fb_{hash(question)}")
+        if fb is not None:
+            st.session_state.feedback[question] = fb
+            if fb == 1:
+                st.toast("👍 Спасибо за оценку!")
+            else:
+                st.toast("👎 Спасибо, мы учтём это")
+
+    with st.expander(f"📚 Показать источники ({len(sources)})", expanded=False):
+        for src in sources[:15]:
+            st.markdown(f"• {src}")
+
+    with st.expander(f"🔍 Показать фрагменты ({len(unique_filtered)})", expanded=False):
+        for i, c in enumerate(unique_filtered, 1):
+            ref = c['source']
+            if c['section']:
+                ref += f", раздел {c['section']}"
+            if c['tables']:
+                ref += f", таблица {c['tables']}"
+            st.markdown(f"**Фрагмент {i}** · *{ref}* · тип: `{c['type']}`")
+            st.markdown(f"> {c['text']}")
+            st.markdown("---")
