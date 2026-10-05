@@ -1,5 +1,6 @@
 # db_builder.py — ФИНАЛЬНАЯ версия
-# Фиксы A-H, I(v2), J, IV, V, VI, VII, VIII, IX, X
+# Фиксы A-H, I(v2), J, IV, V, VI, VII, VIII, IX, X + debug_chapters
+#
 # IV:   RE_CHAPTER_STRICT — строгий regex для глав
 # V:    выход из таблицы только на RE_CHAPTER_STRICT или RE_POINT (N.M)
 # VI:   RE_POINT_TEXT удалён
@@ -9,12 +10,11 @@
 # IX:   вход в in_appendix_section только если следующая непустая —
 #       (обязательное) / (рекомендуемое) / (справочное)
 # X:    RE_CHAPTER_STRICT допускает до 9 слов в названии главы
-#       (для "9 Сооружение железобетонных, бетонных, полимерных
-#        композитных мостов и труб")
 
 import os
 import re
 import hashlib
+from collections import Counter
 from typing import List, Dict, Optional, Callable
 
 import chromadb
@@ -40,8 +40,6 @@ VALID_CHAPTER_RANGES = {
 
 RE_CHAPTER = re.compile(r"^(\d{1,2})\s+([А-ЯЁ][а-яё][^\n]{1,})$")
 
-# Фикс X: до 9 слов в названии главы ({0,8} после первого).
-# Фикс VIII: в конце допускаются пробелы и '*' (сноска).
 RE_CHAPTER_STRICT = re.compile(
     r"^(\d{1,2})\s+([А-ЯЁ][а-яё]+(?:\s+[а-яёА-ЯЁ\-]+){0,8})"
     r"(?:\s*\([А-ЯЁ][а-яёА-ЯЁ\-]*\))?"
@@ -381,6 +379,33 @@ def merge_short_chunks(chunks: List[Dict]) -> List[Dict]:
     return merged
 
 
+def _debug_chapters(documents_dir: str = "documents"):
+    """Печатает по каждому документу: чанков, главы, число таблиц.
+    Не требует модели эмбеддингов и ChromaDB — только парсер."""
+    print("=" * 78)
+    print("ДИАГНОСТИКА ПАРСЕРА (без сборки базы)")
+    print("=" * 78)
+    total = 0
+    for fname in sorted(os.listdir(documents_dir)):
+        if not fname.endswith(".txt"):
+            continue
+        path = os.path.join(documents_dir, fname)
+        chunks = merge_short_chunks(parse_document(path))
+        chapters = sorted(
+            Counter(c["chapter"] for c in chunks if c["chapter"]).keys(),
+            key=lambda x: int(x) if x.isdigit() else 999,
+        )
+        tables = sorted(set(c["table_number"] for c in chunks if c["table_number"]))
+        print(f"{fname}:")
+        print(f"    чанков = {len(chunks)}")
+        print(f"    главы  = {chapters}")
+        print(f"    таблиц = {len(tables)}")
+        total += len(chunks)
+    print("-" * 78)
+    print(f"ИТОГО чанков: {total}")
+    print("=" * 78)
+
+
 def build_database(
     documents_dir: str = "documents",
     progress_callback: Optional[Callable[[str], None]] = None,
@@ -447,4 +472,7 @@ def build_database(
 build_db = build_database
 
 if __name__ == "__main__":
+    # Сначала — быстрая диагностика парсера (секунды, без модели).
+    _debug_chapters()
+    # Потом — полная сборка базы (минуты, с моделью эмбеддингов).
     build_database()
