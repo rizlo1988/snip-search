@@ -4,6 +4,7 @@ from openai import OpenAI
 import re
 import os
 from datetime import datetime
+from collections import Counter
 from db_builder import DB_PATH, COLLECTION_NAME
 
 # PDF
@@ -169,6 +170,64 @@ def count_sources():
 
 sources_list = count_sources()
 
+
+# ==================== АУДИТ БАЗЫ ====================
+def run_audit():
+    """Собирает статистику по базе. Возвращает список строк отчёта."""
+    lines = []
+    try:
+        all_meta = collection.get(include=["metadatas", "documents"])
+    except Exception as e:
+        return [f"❌ Ошибка доступа к базе: {e}"]
+
+    metas = all_meta.get("metadatas") or []
+    docs = all_meta.get("documents") or []
+    sources = sorted(set(m["source"] for m in metas if m and m.get("source")))
+
+    lines.append(f"**Всего чанков:** {len(docs)}")
+    lines.append(f"**Всего документов:** {len(sources)}")
+    lines.append("")
+    lines.append("---")
+
+    for src in sources:
+        try:
+            r = collection.get(where={"source": src}, include=["metadatas", "documents"])
+        except Exception as e:
+            lines.append(f"**{src}**: ошибка — {e}")
+            continue
+
+        m_list = r.get("metadatas") or []
+        d_list = r.get("documents") or []
+        n = len(d_list)
+        if n == 0:
+            lines.append(f"**{src}** — пусто")
+            continue
+
+        chapters = sorted(
+            set(m.get("chapter", "") for m in m_list if m.get("chapter")),
+            key=lambda x: int(x) if x.isdigit() else 999,
+        )
+        points = sorted(set(m.get("point", "") for m in m_list if m.get("point")))
+        tables = sorted(set(m.get("table_number", "") for m in m_list if m.get("table_number")))
+
+        no_chapter = sum(1 for m in m_list if not m.get("chapter"))
+        no_point = sum(1 for m in m_list if not m.get("point"))
+        short = sum(1 for d in d_list if len(d) < 200)
+        no_digits = sum(1 for d in d_list if not re.search(r"\d", d))
+        avg_len = sum(len(d) for d in d_list) / n if n else 0
+
+        lines.append(f"### {src}")
+        lines.append(f"- Чанков: **{n}**, средняя длина: **{avg_len:.0f}** символов")
+        lines.append(f"- Главы ({len(chapters)}): `{chapters}`")
+        lines.append(f"- Пунктов: **{len(points)}** — первые: `{points[:20]}`")
+        lines.append(f"- Таблицы ({len(tables)}): `{tables}`")
+        lines.append(f"- Пустой chapter: **{no_chapter}**, пустой point: **{no_point}**")
+        lines.append(f"- Чанков <200 символов: **{short}**, без цифр: **{no_digits}**")
+        lines.append("")
+
+    return lines
+
+
 # ==================== SESSION STATE ====================
 if "history" not in st.session_state:
     st.session_state.history = []
@@ -240,6 +299,18 @@ with st.sidebar:
         ups = sum(1 for v in st.session_state.feedback.values() if v == 1)
         downs = sum(1 for v in st.session_state.feedback.values() if v == 0)
         st.markdown(f"👍 **{ups}** · 👎 **{downs}**")
+
+    # ===== АУДИТ БАЗЫ =====
+    st.markdown("---")
+    st.markdown("### 🔎 Аудит базы")
+    if st.button("Запустить аудит", use_container_width=True, key="audit_btn"):
+        with st.spinner("Считаю статистику…"):
+            st.session_state["audit_report"] = run_audit()
+
+    if st.session_state.get("audit_report"):
+        with st.expander("Показать отчёт", expanded=True):
+            for line in st.session_state["audit_report"]:
+                st.markdown(line)
 
 
 # ==================== ОСНОВНОЙ КОНТЕНТ ====================
